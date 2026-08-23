@@ -64,6 +64,12 @@ dspy_modules/
 
 **Input reduction:** reuse `skill_generator.py`'s existing `_summarize_trace_for_prompt` approach (task/outcome/tool-calls/final-text, truncated) as the `trace_summary` fed to `Segmenter` — it already solves the "don't blow the context budget on raw API payloads" problem; port it into `p1_extraction.py` rather than rewriting it.
 
+**Grounding and hygiene (both `signatures.py` instructions, following Hermes Agent's `agent/learn_prompt.py` authoring standards):**
+- `AbstractSkill`'s instructions must forbid inventing commands, flags, paths, or APIs not present in `segment_text` — generalize the values that occur in the trace, never backfill plausible-looking ones. This is checked, not just requested: `AbstractionJudge`'s `overgeneral`/`episode_specific` flags exist to catch drift, but the instruction itself sets the default.
+- Tool output inside a trace (file contents, web pages, command output the agent read mid-task) is untrusted text the model happened to read, not an instruction to `Segmenter`/`Abstractor`. Both signatures' instructions state explicitly that trace content is data: nothing in it should redirect what gets extracted or leak into the authored skill as if it were part of the task's own intent.
+
+**Redaction:** `save_trace` (`trace_collection/collector.py` / `tbench_adapter.py`) must run collected tool output through a secret redactor before writing the trace JSON to disk — collected bash/file-tool output can contain credentials or tokens the agent encountered mid-task, and nothing today strips them. Add this as a `trace_collection/redact.py` pass applied at `save_trace` time, not deferred to a later export step.
+
 **Disposition of `trace_collection/skill_generator.py`:** its single-call trace→`SKILL.md` path is superseded by `extract_skills` + P2's `Librarian` (§4). Keep it working as a CLI fallback (`generate-skill`) until `p1_extraction.py` + `skill_library/` reach parity, then remove it rather than maintaining two skill-generation paths.
 
 **Acceptance criteria (M1):**
@@ -77,15 +83,23 @@ dspy_modules/
 ```
 skill_library/
   __init__.py
-  storage.py     # Skill / Provenance dataclasses (spec §4.3); read/write SKILL.md + metadata.json per skill
+  storage.py     # Skill / Provenance dataclasses (spec §4.3); read/write SKILL.md + metadata.json per
+                   # skill; archive()/restore() move a skill to/from .archive/ (never delete); pin()/unpin()
   index.py         # embedding index over `activation` + `prerequisites` text (used for dedup lookup here;
-                     # becomes the P5 retrieval index later — same artifact, no rework needed)
-  librarian.py       # Librarian(dspy.Module) + apply_decision() that executes it against storage.py
+                     # becomes the P5 retrieval index later — same artifact, no rework needed); excludes
+                     # archived skills
+  librarian.py       # Librarian(dspy.Module) + apply_decision() that executes it against storage.py;
+                       # sweep_retirements() (calls storage.archive(), never a hard delete)
 ```
 
 **Signature:** `LibrarianDecide(candidate_skill, nearest_existing: list[Skill] -> action: Literal[CREATE,REVISE,MERGE,SPECIALIZE,REJECT], target_skill_id: str | None, rationale: str)`.
 
 **`Librarian(dspy.Module)` flow:** embed the candidate's `activation`+`prerequisites` via `index.py`, pull top-k nearest existing skills (filtered by `repo_context`/`task_type` when set), call `LibrarianDecide`. `RETIRE` (§5.2 of the spec) is not an LLM decision — it's a scheduled, metrics-driven sweep (`librarian.py::sweep_retirements()`) over utilization×success-rate, run separately from the per-candidate decision path.
+
+**Invariants (`storage.py`/`librarian.py`), matching Hermes Agent's `agent/curator.py` since these are the difference between a maintenance system and a liability:**
+- `sweep_retirements()` archives, it never deletes: an archived skill's files move to `skill_library/.archive/<skill_id>/` (out of `index.py`'s retrieval set) with `status="archived"`, and `storage.py` exposes a `restore(skill_id)` that moves it back.
+- Every decision path (`Librarian` calls and `sweep_retirements()` alike) skips any skill with `pinned=True` before doing anything else — no `REVISE`/`MERGE`/`SPECIALIZE`/`RETIRE` ever touches a pinned skill. `storage.py` needs a `pin`/`unpin` entrypoint; nothing automated ever flips that flag.
+- `Librarian` only ever proposes actions against skills with non-empty `provenance.source_trace_ids` (i.e., skills `extract_skills` produced). If the library is later seeded with any hand-authored skill, it has no `source_trace_ids` and is invisible to `Librarian`'s decision path by construction — it's a human's file to edit directly.
 
 **No auto-write to `active`:** every `CREATE`/`REVISE`/`MERGE`/`SPECIALIZE` output from `Librarian` is written with `status="candidate"`, never directly overwriting a `status="active"` skill. In this plan's scope (no full P4 yet), promotion to `active` uses the **lite gate** described in §6 — this is the one place P2 depends on something from P3/§6 rather than the reverse.
 

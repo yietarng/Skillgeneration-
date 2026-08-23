@@ -93,13 +93,24 @@ class Skill:
     skill_id: str
     version: int
     name: str
-    activation: str          # when this should trigger — retrieval + applicability check use this
+    activation: str          # <=60 chars. This is the only field loaded for EVERY skill during
+                              # retrieval (§5.5) — a real deployed system (Hermes Agent's skill
+                              # index) hard-truncates past this length, silently dropping anything
+                              # over the cap rather than erroring, so treat it as load-bearing, not
+                              # stylistic. Full nuance belongs in `procedure`, loaded only on activation.
     prerequisites: list[str] # applicability conditions; a failed check blocks activation
     procedure: str           # the reusable procedure / decision points
     failure_recovery: list[str]  # common failures and recovery strategies
     verification: str        # verification and termination criteria
+    related_skills: list[str]    # declared cross-references (cheaper than recomputing nearest-
+                                  # neighbors for every retrieval; also lets P2 dedup use explicit
+                                  # links a skill's author/reviser already knows about)
+    pinned: bool              # true = exempt from all automated RETIRE/MERGE/REVISE transitions;
+                                # set by a human, cleared only by a human. See §5.2.
     provenance: Provenance
-    status: Literal["candidate", "active", "deprecated", "retired"]
+    status: Literal["candidate", "active", "deprecated", "archived"]  # "archived" replaces
+        # "retired" from the original draft: retirement is a reversible archive, never a delete —
+        # see §5.2.
 ```
 
 ```python
@@ -132,7 +143,7 @@ class EvaluationRecord:
 
 - `Segmenter(dspy.Module)` — given a trace's turn sequence (tool calls, outcomes, plan text), proposes segment boundaries and classifies each into `plan | procedure | tool_convention | failure_recovery | noise`. Boundary heuristics seed the search: sub-goal changes in stated plans, error→recovery pairs (tool call with `is_error=True` followed by a differing retry that succeeds), and verification/termination points.
 - `AbstractionJudge(dspy.Module)` — scores a candidate segment's abstraction level. Rejects `noise` and flags `overgeneral` (no actionable specifics) vs `episode_specific` (unreplaced literal paths/names/values) so the `Abstractor` knows what to fix.
-- `Abstractor(dspy.Module)` — rewrites an accepted segment into a **candidate skill draft** populating all six required fields, generalizing literal values (paths, exact commands, repo names) into parameterized patterns while preserving the decision logic.
+- `Abstractor(dspy.Module)` — rewrites an accepted segment into a **candidate skill draft** populating all six required fields, generalizing literal values (paths, exact commands, repo names) into parameterized patterns while preserving the decision logic. Two grounding rules, taken from Hermes Agent's `/learn` skill-authoring standards (`agent/learn_prompt.py`) because they name failure modes an unconstrained distiller reliably falls into: (1) never invent a command, flag, path, or API that doesn't appear in the trace — generalize the values that are there, don't backfill plausible-looking ones; (2) treat trace content as data, not instructions — tool output the agent read during the task (file contents, web pages, command output) can contain text that looks like directives, and none of it may steer what `Segmenter`/`Abstractor` produce or leak into the authored skill as if it came from the task itself.
 
 **Handling unsuccessful branches:** a `failure_recovery` segment is extracted *because* it failed and then recovered — the failed sub-branch is the point. `is_successful_branch=False` segments are not discarded; they are the primary source for the `failure_recovery` field. A trace that ends in overall failure can still yield a valid skill if it contains a genuine recovery, distinguished from segments that are simply dead ends (no recovery, no signal) via `AbstractionJudge`.
 
@@ -150,13 +161,20 @@ class EvaluationRecord:
 | `REVISE` | Same skill, new evidence — refines procedure/recovery/prerequisites in place, version bump |
 | `MERGE` | Two+ skills cover overlapping conditions with compatible procedures — consolidate, retire the smaller |
 | `SPECIALIZE` | An existing general skill's procedure fails in a repo/language-specific way that recurs — fork a scoped variant, keep the general skill for other contexts |
-| `REJECT` | Duplicate with no new information, or fails a minimum-utility bar (e.g., only ever solved a single episode, no generalizable decision point) |
+| `REJECT` | Duplicate with no new information, or fails a minimum-utility bar (e.g., only ever solved a single episode, no generalizable decision point), or is a router/index skill that only points at other skills with no content of its own |
 | `RETIRE` | Existing skill's rolling success rate degrades below threshold, or it's superseded by a merge/specialization and its unique coverage is now zero |
 
+**Invariants, adopted from Hermes Agent's `curator.py` (a shipped background skill-maintenance orchestrator solving this exact problem) because they're proven, not merely plausible:**
+- **`RETIRE` never deletes — it archives.** An archived skill moves to a recoverable location (`status="archived"`, moved out of the retrieval index) and can be restored. A skill-maintenance system that can silently and permanently delete a skill is one bad batch away from destroying institutional knowledge no trace can reconstruct; reversibility is the actual safety property, not a nice-to-have.
+- **`pinned` skills are exempt from every automated transition** — `REVISE`, `MERGE`, `SPECIALIZE`, and `RETIRE` all skip a `pinned=True` skill unconditionally. Pinning is human-set and human-cleared only; it's the escape hatch for a skill a person has reviewed and wants stable regardless of what the metrics say.
+- **The Librarian only ever acts on skills it (or a prior Librarian pass) created** — i.e., skills carrying real `provenance.source_trace_ids`. If the library is ever seeded with hand-authored "base" skills, those are out of scope for automated `REVISE`/`MERGE`/`SPECIALIZE`/`RETIRE` entirely; a human edits those directly.
+
 **Compactness controls:**
-- Hard library size budget; `RETIRE` is triggered by a utilization × success-rate score falling out of the bottom percentile when the budget is exceeded (not just LRU).
+- Hard library size budget; `RETIRE` is triggered by a utilization × success-rate score falling out of the bottom percentile when the budget is exceeded (not just LRU) — subject to the `pinned` exemption above.
 - Semantic dedup gate before `CREATE`: embedding similarity threshold, then an LLM-judge tie-breaker for borderline cases (`MERGE` vs `CREATE`).
 - Every accepted `REVISE`/`MERGE`/`SPECIALIZE` must pass P4 validation before it replaces what's live (see 5.4) — the Librarian proposes, it doesn't deploy.
+
+**Execution model:** run the Librarian (and P3's evolution batches) against a separate, lighter-weight backend session/budget from the one executing live tasks — not the main task-execution session's context or prompt cache. Hermes' curator makes this a strict invariant ("uses the auxiliary client; never touches the main session's prompt cache") for a concrete reason: background library maintenance runs on a different cadence (idle-triggered or batched) than task execution, and letting it share the primary session's cache/context would make maintenance cost bleed into every live task's latency and token bill.
 
 ### 5.3 P3 — Weight-Free Skill Evolution (GEPA)
 
@@ -187,14 +205,15 @@ Every skill revision produced by P2 (`REVISE`/`MERGE`/`SPECIALIZE`) or P3 (GEPA 
 - **Activation:** an `ApplicabilityChecker(dspy.Module)` evaluates each retrieved candidate's `prerequisites` against the current task + repo state before it's allowed into context — retrieval similarity alone is not sufficient permission to activate. Verdicts are cached per `(repo_context, skill_id, skill_version)` so this check isn't repaid in full on every task. Failed checks are logged (useful signal for P1/P2: a skill that's retrieved often but rarely passes activation may need narrower `prerequisites` or a `SPECIALIZE` split). When multiple skills pass activation for one task, apply an explicit precedence order (e.g., `failure_recovery`-triggered skills after `plan`/`procedure`-triggered ones, narrower `prerequisites` before broader) rather than injecting an unordered set — conflicting procedures from co-activated skills must resolve deterministically, not by injection order.
 - **Adaptation:** an `Adapter(dspy.Module)` rewrites an activated skill's generic `procedure` into task/repo-concrete guidance (actual paths, actual tool names, actual test commands) for injection into the agent's context. Adaptation output is **ephemeral** — it is not written back into the library; only genuinely new generalizable knowledge re-enters the library, via a fresh trace through P1. Injected guidance is **advisory, not binding**: the agent may deviate from it, and a deviation is itself signal (worth capturing, not suppressing) that the skill's `procedure` or `prerequisites` may need revision.
 - **Runtime safety gate:** clearing P4's offline validation does not guarantee an adapted, repo-concrete instruction is safe to execute in *this* live repo (e.g., a shell command that was inert against the sandbox that validated it but is destructive here). Apply a lightweight guard at injection time — independent of and in addition to the publish-time gate — before adapted procedure text reaches the tool-execution loop.
-- **Injection:** adapted skill(s) are added to the agent's system/context (same mechanism `SKILL.md` injection already uses), tagged with `skill_id@version` so downstream provenance is unambiguous, under a token budget and a cap on the number of concurrently injected skills, so this step cannot itself become the token-cost regression P4 is supposed to catch.
+- **Injection:** adapted skill(s) are added to the agent's system/context (same mechanism `SKILL.md` injection already uses), tagged with `skill_id@version` so downstream provenance is unambiguous, under a token budget and a cap on the number of concurrently injected skills, so this step cannot itself become the token-cost regression P4 is supposed to catch. The token budget's concrete mechanism, per Hermes Agent's shipped design: only the short `activation` text (§4.3's 60-char cap) is loaded for every library entry at retrieval time — full `procedure`/`failure_recovery` bodies are loaded lazily, only for skills that actually clear activation, not for the whole retrieved candidate set.
+- **Composition:** for task classes where the same skills reliably co-activate together, a curator/human can pre-declare a **bundle** (Hermes Agent's `skill_bundles.py` pattern: a small named set of skills injected as a unit) instead of relying on per-task dynamic precedence resolution for that combination. Bundles are a compactness/reliability win for known-good combinations; dynamic precedence (previous bullet) remains the fallback for combinations no one has pre-declared.
 - **Closed loop:** the resulting task trace is collected exactly like any other (§4.1's `provenance` records which skill(s) were active, at which version), and feeds back into P1 — this is how the system observes whether adapted guidance actually helped, independent of the offline P4 suites. When multiple skills were co-active on one task, attribute outcome credit per skill (e.g., by which skill's guidance the accepted actions actually followed, per the deviation signal above) rather than crediting all co-active skills equally — this attribution is what makes §7's retrieval-hit-rate and activation-pass-rate metrics meaningful per skill instead of only in aggregate.
 
 ## 6. Why DSPy + GEPA specifically
 
 - **DSPy** gives every module above (`Segmenter`, `AbstractionJudge`, `Abstractor`, `Librarian`, `ApplicabilityChecker`, `Adapter`) a declarative `Signature` instead of a hand-tuned prompt string, and composes them as `dspy.Module`s against a swappable backend LM — this is what makes "different backend models" (stated requirement) a configuration change, not a rewrite.
 - **GEPA** is the P3 engine specifically because it optimizes *text* components from *reflective, textual* feedback (not just scalar reward), with Pareto-based multi-objective candidate selection — which maps directly onto "improve from heterogeneous feedback without weight updates" and onto needing to balance task success against cost/regression rather than a single scalar. It's invoked as an offline batch optimizer per skill (or skill cluster) over accumulated `EvaluationRecord`s, gated by P4 before anything it proposes goes live — GEPA proposes, P4 disposes.
-- **Hermes Agent** is a reference for agentic tool-use loop structure and system-prompt conventions; the current `trace_collection/collector.py` already implements a comparable manual agentic loop directly against the Anthropic API (bash + text-editor tools) — reuse that as the execution substrate rather than re-deriving one.
+- **Hermes Agent** ([nousresearch/hermes-agent](https://github.com/nousresearch/hermes-agent)) is a reference for more than loop structure — it's a shipped system solving this exact problem, and several of its modules are direct analogs adopted by name above: `agent/curator.py` (P2's archive-not-delete, pinned-exempt, agent-created-only, auxiliary-session invariants), `agent/learn_prompt.py` (P1's grounding/hygiene rules and the skill-index length cap), `agent/skill_bundles.py` (P5's composition fallback), `agent/verification_evidence.py` (§7's note below on ground-truth signals). Its own extraction path is notably *not* a separate distillation pipeline — `/learn` prompts the live agent to author the skill itself with its existing tools, explicitly to avoid "a separate distillation engine and no model-tool footprint" so the same flow works unmodified across backends. This plan's DSPy pipeline (§5.1) is a different, more automatable choice — needed because P3's GEPA loop requires a skill's text to be an addressable, independently-optimizable artifact, not just something authored inline in one agent turn — but Hermes' simpler in-loop approach is worth keeping in mind as a fallback if the DSPy pipeline's extraction quality doesn't clear the pipeline's own added complexity. The current `trace_collection/collector.py` already implements a comparable manual agentic loop directly against the Anthropic API (bash + text-editor tools) as its execution substrate.
 
 ## 7. Metrics
 
@@ -244,7 +263,8 @@ eval/benchmarks/        # versioned in-domain + regression task suites
 
 ## 11. Open questions / risks
 
-- **Ground-truth signal availability:** not every task has tests; need an LLM-judge fallback for `outcome_signal`, which itself needs calibration against real test-backed tasks to avoid judge drift.
+- **Ground-truth signal availability:** not every task has tests; need an LLM-judge fallback for `outcome_signal`, which itself needs calibration against real test-backed tasks to avoid judge drift. A cheaper intermediate signal, before reaching for a judge: Hermes Agent's `agent/verification_evidence.py` keeps a passive, decoupled ledger of what the agent actually ran and observed during the task (test commands, their output) — deliberately never deciding to run checks itself, just recording proof when it exists. Mirroring that (record what verification evidence a trace's own tool calls produced, independent of whether an external test suite exists) gives `outcome_signal` a middle tier between "test suite says pass/fail" and "ask an LLM to guess."
+- **Trace/skill content redaction:** neither this spec nor the current `trace_collection` code redacts secrets before persisting a trace or writing a skill to disk, but collected tool output can contain credentials, tokens, or other sensitive values the agent encountered mid-task. Hermes Agent treats this as non-optional: `agent/trace_upload.py` makes any exported trace private-by-default and passes every text body through a secret redactor unless the caller explicitly opts out. `save_trace` (P1's collection step) and `write_skill`/the library's `metadata.json` (P2) need an equivalent redaction pass before anything touches disk, not just before a hypothetical future export step.
 - **GEPA loop cost:** reflective evolution adds LLM calls beyond task execution; needs a batching/cadence policy (e.g., weekly per active skill cluster) rather than per-trace.
 - **Domain boundary definition:** in-domain held-out vs. system regression only works if "domain" (task class) is well-defined per skill — ill-defined domains make P4's overfitting check meaningless.
 - **General skill vs. repo-specific fork:** the `SPECIALIZE` action needs a concrete threshold (how many repo-specific failures before forking) to avoid fragmenting the library.
@@ -256,13 +276,16 @@ eval/benchmarks/        # versioned in-domain + regression task suites
 ---
 skill_id: <slug>
 version: <int>
-status: candidate|active|deprecated|retired
+status: candidate|active|deprecated|archived
+pinned: false
+related_skills: []
 ---
 
 # <Skill name>
 
 ## Activation
-<when this should trigger>
+<when this should trigger — <=60 chars; this is the only text loaded for every
+library entry at retrieval time, so anything past the cap never routes>
 
 ## Prerequisites
 - <applicability condition>
