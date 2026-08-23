@@ -45,6 +45,11 @@ class TraceCollector:
     run the same agentic loop against a different execution environment --
     anything satisfying tool_handlers.SandboxedToolRunner's
     .run(name, tool_input) -> (output, is_error) interface works.
+
+    Pass system_prompt_addendum to append extra guidance (e.g.
+    evolution/skill_injection.py's rendered skill text) after the base
+    SYSTEM_PROMPT -- this is P3/P5's only injection point into the agent
+    loop; the loop itself is otherwise unaware skills exist.
     """
 
     def __init__(
@@ -56,6 +61,7 @@ class TraceCollector:
         client: anthropic.Anthropic | None = None,
         tool_runner: Any | None = None,
         tool_defs: list[dict[str, Any]] | None = None,
+        system_prompt_addendum: str | None = None,
     ):
         if tool_runner is None and workdir is None:
             raise ValueError("workdir is required unless tool_runner is supplied")
@@ -67,6 +73,9 @@ class TraceCollector:
         self.client = client or anthropic.Anthropic()
         self.tools = tool_runner if tool_runner is not None else SandboxedToolRunner(workdir)
         self.tool_defs = tool_defs if tool_defs is not None else [BASH_TOOL, TEXT_EDITOR_TOOL]
+        self.system_prompt = (
+            f"{SYSTEM_PROMPT}\n\n{system_prompt_addendum}" if system_prompt_addendum else SYSTEM_PROMPT
+        )
 
     def run(self, task: str) -> Trace:
         trace = Trace(
@@ -84,7 +93,7 @@ class TraceCollector:
                 response = self.client.messages.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
-                    system=SYSTEM_PROMPT,
+                    system=self.system_prompt,
                     tools=self.tool_defs,
                     thinking={"type": "adaptive", "display": "summarized"},
                     messages=messages,
