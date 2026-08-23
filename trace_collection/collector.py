@@ -15,6 +15,7 @@ from typing import Any
 
 import anthropic
 
+from .redact import redact_value
 from .schema import StepRecord, Trace, ToolCallRecord, new_trace_id
 from .tool_handlers import BASH_TOOL, TEXT_EDITOR_TOOL, SandboxedToolRunner
 
@@ -156,5 +157,6 @@ def save_trace(trace: Trace, out_dir: str) -> Path:
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     file_path = out_path / f"{trace.trace_id}.json"
-    file_path.write_text(json.dumps(trace.to_dict(), indent=2, default=str))
+    redacted = redact_value(trace.to_dict())
+    file_path.write_text(json.dumps(redacted, indent=2, default=str))
     return file_path
