@@ -46,11 +46,20 @@ def run_tbench_task(
     model: str = DEFAULT_MODEL,
     max_turns: int = DEFAULT_MAX_TURNS,
     no_rebuild: bool = False,
+    system_prompt_addendum: str | None = None,
 ) -> Trace:
     """Start task_id's container, run TraceCollector against it through a
     tmux session (matching how Terminal-Bench's own agents interact), run
     the task's own verification, and return a Trace with outcome_signal
-    filled in from the real per-test results."""
+    filled in from the real per-test results.
+
+    system_prompt_addendum is forwarded to TraceCollector unchanged --
+    this is what lets this function double as an
+    orchestrator.driver.CollectTraceFn/evolution.adapter.RunTaskFn/
+    validation's run_task_fn: retrieval's injected guidance (P5) or a
+    GEPA/validation candidate's rendered text (P3/P4) reaches the real
+    agent loop through the same parameter, not a second injection path.
+    """
     input_path = Path(tasks_dir) / task_id
     trial_name = f"skillgen-{task_id}-{uuid.uuid4().hex[:8]}"
     trial_handler = TrialHandler(trial_name=trial_name, input_path=input_path)
@@ -76,6 +85,7 @@ def run_tbench_task(
             max_turns=max_turns,
             tool_runner=tools,
             tool_defs=[BASH_TOOL, TEXT_EDITOR_TOOL],
+            system_prompt_addendum=system_prompt_addendum,
         )
 
         trace = collector.run(task.instruction)

@@ -29,10 +29,16 @@ def build_system_prompt_addendum(skill: Skill) -> str:
     """Rendered guidance injected into TraceCollector's system prompt.
     Framed as advisory, not binding (spec §5.5) -- the agent may deviate
     from it; that deviation is itself signal for a future revision, not
-    something to suppress."""
+    something to suppress.
+
+    Explicitly tagged with skill_id@version up front, matching
+    retrieval/injection.py's render_addendum (P5) -- skill_to_markdown()'s
+    frontmatter states these on separate lines, which isn't the same as a
+    single greppable tag identifying exactly which candidate a resulting
+    trace's guidance came from."""
     return (
-        "You have a relevant skill available from a prior similar task. "
-        "Treat it as advisory guidance, not a binding instruction -- if the "
+        f"[skill {skill.skill_id}@{skill.version}] You have a relevant skill available from a prior "
+        "similar task. Treat it as advisory guidance, not a binding instruction -- if the "
         "current task genuinely calls for something different, deviate "
         f"from it.\n\n{skill_to_markdown(skill)}"
     )

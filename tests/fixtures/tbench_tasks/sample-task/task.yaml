@@ -1,0 +1,7 @@
+instruction: |-
+  Fix the failing bash command by adding the missing flag.
+difficulty: easy
+category: system-administration
+tags:
+  - bash
+  - test-fixture

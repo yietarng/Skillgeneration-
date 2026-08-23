@@ -1,7 +1,7 @@
-# Implementation Plan: P1 → P2 → P3 → P4 → P5 → Orchestrator
+# Implementation Plan: P1 → P2 → P3 → P4 → P5 → Orchestrator → CLI
 
-Status: converts `PROJECT_SPEC.md` into a sequenced, buildable plan; **P1-P5 all built, tested, and documented**, and §10 now ties them into a single driver. What remains is not a phase but running the whole thing against real infrastructure: a real Terminal-Bench task corpus and a real LLM/Docker environment — see §9/§10's own caveats.
-Scope for this plan: **P1 (Trajectory Segmentation and Extraction) → P2 (Skill-Library Maintenance) → P3 (Weight-Free Skill Evolution via GEPA) → P4 (Safe Validation and Regression Control) → P5 (Skill Retrieval, Activation, and Adaptation) → an orchestrator (§10) tying all five into one loop**.
+Status: converts `PROJECT_SPEC.md` into a sequenced, buildable plan; **P1-P5 all built, tested, and documented**, §10 ties them into a single driver, and §11 gives that driver a real command-line entrypoint against actual Terminal-Bench task execution. What remains is not a phase but running the whole thing continuously against real infrastructure: a real Terminal-Bench task corpus (§1's pinned list is still unpicked) and sustained access to Docker + a live LLM key. See §9/§10/§11's own verification notes for exactly what is and isn't confirmed.
+Scope for this plan: **P1 (Trajectory Segmentation and Extraction) → P2 (Skill-Library Maintenance) → P3 (Weight-Free Skill Evolution via GEPA) → P4 (Safe Validation and Regression Control) → P5 (Skill Retrieval, Activation, and Adaptation) → an orchestrator (§10) tying all five into one loop → a CLI (§11) driving that orchestrator against real task execution**.
 
 ## 1. Trace corpus: Terminal-Bench
 
@@ -347,3 +347,33 @@ Build strictly in this order — P2's `Librarian` needs real candidate drafts fr
 - `tests/test_orchestrator.py::test_run_evolution_cycle_lite_gate_rejected` / `test_run_evolution_cycle_promotion_rejected` — these two use `monkeypatch` on `evolve_skill()` rather than a real GEPA search, because reliably forcing a real optimizer to land on a specific rejected candidate isn't practical; what's being tested here is `run_evolution_cycle`'s own branching (does a lite-gate rejection correctly avoid ever calling `evaluate_promotion`; does a promotion rejection correctly leave the library's active version unchanged while still keeping the rejected candidate on disk for inspection), not GEPA's search behavior, which is already covered by the two real runs above.
 
 **Deliberately not built:** live shadow-traffic mirroring — silently running an unpromoted candidate alongside the active skill on a slice of real tasks to feed `validation.shadow.ShadowLedger` with live (not offline-suite) evidence. That ledger already exists from P4 and could be wired to a future canary-traffic feature; the mirroring mechanism itself would add real complexity (a second agent run per task, careful isolation so the shadow run can't affect the real one) without having been asked for, so it's flagged here rather than half-built.
+
+## 11. Orchestrator CLI
+
+**Status: built (`orchestrator/cli.py`) and verified against the real `terminal-bench` package and a real task fixture** — not just import-checked. `handle-task` and `evolve` wrap `Orchestrator.handle_task()`/`run_evolution_cycle()` (§10) with real Terminal-Bench task execution (`trace_collection.tbench_adapter.run_tbench_task`) as their `collect_trace_fn`/`run_task_fn`.
+
+```
+python -m orchestrator.cli handle-task \
+    --library-dir ./skill_library_data --tasks-dir ./terminal-bench/original-tasks \
+    --task-id acl-permissions-inheritance
+
+python -m orchestrator.cli evolve \
+    --library-dir ./skill_library_data --tasks-dir ./terminal-bench/original-tasks \
+    --skill-id bash-missing-flag \
+    --gepa-train task-a,task-b,task-c --gepa-val task-d,task-e \
+    --in-domain task-f,task-g --regression task-h,task-i \
+    --reflection-model anthropic/claude-opus-5
+```
+
+**Two separate model flags, not one, on purpose:** `--model` is Anthropic-SDK-style (`"claude-opus-5"`, `trace_collection.collector`'s convention — what `TraceCollector`/`run_tbench_task` need) while `--reflection-model` is litellm-style (`"anthropic/claude-opus-5"`, what `gepa.optimize()`'s `reflection_lm` expects). `dspy_modules.lm_config`'s own model (used by `extract_skills`/`Librarian`/`ApplicabilityChecker`/`Adapter`) isn't exposed as a third flag at all — it already reads `SKILLGEN_DSPY_MODEL` from the environment when an override is needed. Three model-ish flags in three string formats would only multiply the ways to get this wrong; the CLI's own docstring spells out why each one is scoped the way it is.
+
+**`rebuild_index(library) -> EmbeddingIndex`:** fills a real gap this CLI's existence exposed — `skill_library.index.EmbeddingIndex` is in-memory only, so every fresh CLI invocation needs to reconstruct it from the library's `active`-status skills before retrieval can find anything. `main()` calls this once at startup for both subcommands.
+
+**Two real bugs this build caught, fixed at the source rather than worked around:**
+- `trace_collection/tbench_adapter.py`'s `run_tbench_task()` had no `system_prompt_addendum` parameter at all — meaning nothing built through §5-§10 could actually have injected retrieval/evolution guidance into a real Terminal-Bench run; every prior integration test used the local `SandboxedToolRunner` path or a fake `collect_trace_fn`/`run_task_fn`, so this gap was invisible until the CLI needed to wire a *real* execution path end to end. Fixed by threading the parameter through to `TraceCollector`.
+- `evolution/skill_injection.py`'s `build_system_prompt_addendum()` didn't tag its output with `skill_id@version` the way `retrieval/injection.py`'s `render_addendum()` does — a real inconsistency between the P3/P4 injection path and the P5 one, caught by a test asserting the tag was present. Fixed at the source (both paths now tag consistently), not by changing the test's expectation to match the weaker behavior.
+
+**Verified how:** since `orchestrator/cli.py`'s tbench-backed functions lazily import `trace_collection.tbench_adapter` (itself a hard dependency on `terminal_bench`, Python ≥3.12), they can't even be *called* in this repo's normal Python 3.11 dev/test environment — only imported (the lazy-import pattern keeps the module itself loadable). Verified for real in an isolated Python 3.12 venv with `terminal-bench` actually installed: `load_task_instruction()` against a real `task.yaml` (now committed as `tests/fixtures/tbench_tasks/sample-task/`, so this doesn't depend on an external clone), the two closures against a monkeypatched `run_tbench_task` (avoiding a need for live Docker while still exercising real code), and a full `main()` dispatch with only the two genuinely external calls (LM config, `run_tbench_task`) faked out — everything else in that run was real orchestration code.
+
+**Acceptance:**
+- `tests/test_orchestrator_cli.py` — 8 tests need nothing beyond this repo's normal environment (`argparse` structure, `rebuild_index()` against a real `SkillLibrary`/`EmbeddingIndex`) and always run; 3 more (`load_task_instruction`, both `make_tbench_*_fn` closures) are guarded with `pytest.importorskip("terminal_bench")` per-test (not at module level — an earlier draft put the skip at module level and it silently skipped every test in the file, including the ones needing no such thing) so they skip cleanly here and run for real in a proper 3.12+terminal-bench environment. All 11 pass in that environment, confirmed while building this.
