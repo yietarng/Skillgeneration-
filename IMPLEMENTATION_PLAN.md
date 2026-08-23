@@ -1,7 +1,7 @@
-# Implementation Plan: P1 → P2 → P3 → P4
+# Implementation Plan: P1 → P2 → P3 → P4 → P5
 
-Status: converts `PROJECT_SPEC.md` into a sequenced, buildable plan; P1-P4 built, tested, and documented as of this revision.
-Scope for this plan: **P1 (Trajectory Segmentation and Extraction) → P2 (Skill-Library Maintenance) → P3 (Weight-Free Skill Evolution via GEPA) → P4 (Safe Validation and Regression Control)**. P5 (real retrieval/activation/adaptation) is **not** built out here beyond the minimal stub P3 needed to close its own loop — see §7.
+Status: converts `PROJECT_SPEC.md` into a sequenced, buildable plan; **P1-P5 all built, tested, and documented** as of this revision. What remains is not a phase but running the whole thing: a live orchestration loop, a real Terminal-Bench task corpus, and a real LLM/Docker environment — see §7 and §9.
+Scope for this plan: **P1 (Trajectory Segmentation and Extraction) → P2 (Skill-Library Maintenance) → P3 (Weight-Free Skill Evolution via GEPA) → P4 (Safe Validation and Regression Control) → P5 (Skill Retrieval, Activation, and Adaptation)**.
 
 ## 1. Trace corpus: Terminal-Bench
 
@@ -231,15 +231,67 @@ validation/
 - `tests/test_shadow.py` / `tests/test_rollback.py`: eligibility thresholds and rollback's observation-count floor.
 - `tests/test_p3_to_p4_integration.py`: the full chain, end to end, using the same fake-`reflection_lm` + fake-`run_task_fn` substitution documented in §5 — genuinely exercises the P1(schema)→P2(storage)→P3(evolve)→P4(promote) pipeline's wiring, not real-world validation quality.
 
-## 7. What's still a stub, and why
+## 7. Phase P5 — Skill Retrieval, Activation, and Adaptation
 
-P3 and P4 both needed *something* that puts a skill's text into a running agent to score it — that's a sliver of P5 (retrieval/activation/adaptation), built only to the minimum P3/P4 need, not the spec's full design:
+**Status: built (`retrieval/`) and verified against real P1-P4 output** — `tests/test_p5_integration.py` confirms `build_injection()`'s output actually reaches `TraceCollector`'s real `system_prompt_addendum` param (the injection point P3 added), not just that the pipeline's internal types line up. This retires `evolution/skill_injection.py`'s hardcoded single-skill stub as the production path — that module still exists and still does its own narrower job (P3's `evaluate()` deliberately injects one *fixed* candidate under test, bypassing retrieval entirely, which is correct for optimization).
 
-| Full spec component | What this plan builds instead | Gap left for later |
-|---|---|---|
-| P5 retrieval (embedding+BM25+metadata ranking, `ApplicabilityChecker`, adaptation, runtime safety gate) | `evolution/skill_injection.py`: direct, hardcoded injection of one named skill — no ranking, no multi-skill composition, no applicability check, no repo-concrete adaptation | Real retrieval, activation-condition checking, adaptation to repo-concrete specifics, runtime safety gate (spec §5.5) |
+**New module:** `retrieval/`
+```
+retrieval/
+  __init__.py
+  retriever.py     # retrieve(library, index, query_text, repo_context, k, similarity_weight,
+                     # track_record_weight) -> list[RetrievalCandidate]. Reuses
+                     # skill_library.index.EmbeddingIndex directly -- the exact artifact the spec
+                     # anticipated P2's dedup index becoming. Restricted to status="active" skills.
+                     # Blends embedding similarity with track_record_score() (average score across a
+                     # skill's provenance.validation_evidence; 0.5 neutral prior with no evidence
+                     # yet) plus a lexical-overlap fallback for exact-string matches. Lazy-loading is
+                     # structural, not bolted on: the index only ever stores vectors + skill_id, so
+                     # library.read() (full content) is called only for the top-k, not the library.
+  activation.py      # ApplicabilityChecker(dspy.Module): verifies a candidate's prerequisites
+                       # actually hold for this task/repo, not just topical similarity. Cached per
+                       # (repo, task_type, skill_id, version). order_by_precedence(): deterministic
+                       # multi-skill ordering when more than one candidate activates.
+  adapter.py           # Adapter(dspy.Module): rewrites a skill's generic procedure into task-
+                         # concrete guidance. Ephemeral -- never written back to the library. Not to
+                         # be confused with evolution/adapter.py's SkillGEPAAdapter (unrelated).
+  safety_gate.py         # check_adapted_text(): pattern-based guard against obviously destructive
+                           # literal commands (rm -rf /, fork bombs, curl-pipe-to-shell, raw-disk
+                           # writes) an adaptation might introduce. Not a sandbox -- a last check
+                           # before adapted text reaches the agent's context, independent of and in
+                           # addition to P3/P4's publish-time gates.
+  injection.py            # build_injection(): the real thing evolution/skill_injection.py stood in
+                            # for -- runs retrieve() -> activation -> order_by_precedence() ->
+                            # adapt() -> safety gate -> render, capped by max_injected and a
+                            # character-based token-budget proxy (max_total_chars). None
+                            # system_prompt_addendum is a valid, expected outcome at any stage
+                            # (nothing retrieved, nothing activated, everything safety-blocked) --
+                            # never forces a weak match.
+  bundles.py               # BundleStore (Hermes Agent's skill_bundles.py pattern): pre-declared
+                             # named skill_id sets for known-good co-activating combinations, as a
+                             # compactness alternative to per-task dynamic precedence.
+  attribution.py             # attribute_credit(): splits outcome credit across co-active skills by
+                               # lexical overlap between the trace's actual tool-call text and each
+                               # skill's adapted procedure -- an explicit heuristic (no ground truth
+                               # exists for "which skill's guidance was actually followed"),
+                               # documented as such, in the same spirit as skill_library.index's
+                               # hashing embedding.
+```
 
-Treat `skill_injection.py` as throwaway-if-needed scaffolding: when P5 is actually built out, it should absorb and generalize this, not sit alongside it as a permanent second path. (P4 itself is no longer in this table — it was a stub in the original P1-P3 plan, `promotion_gate.py`'s structural+contradiction check standing in for the whole thing; §6 above replaces that stub with the real regression suite, shadow rollout, and rollback the spec calls for. `promotion_gate.py` still has a real job: it's the cheap, fast pre-filter `gepa_runner.evolve_skill()`'s winning candidate passes through *before* the much more expensive `validation/promotion.py` pipeline runs full in-domain + regression suites against it.)
+**A real design bug the tests caught:** the first `retriever.py` draft floored a lexical hit onto the *final blended score* (`max(blended, 0.8)`), which meant a skill with an exact text match to the query could keep outranking a skill with a demonstrated 0% track record forever, no matter how bad its record got. Fixed to floor the *similarity component* before blending instead, so `track_record_weight` can still pull a lexically-exact-but-proven-bad skill back down — `tests/test_retriever.py::test_track_record_can_override_an_exact_lexical_match` pins this down.
+
+**Two intentional approximations, not gaps hiding as gaps:**
+- `order_by_precedence`'s "failure_recovery-oriented before procedure-oriented" ordering (spec §5.5) needs a skill's *originating* kind, but `Skill` doesn't persist the `Segment.kind` it came from — only the trace-level `Segment` does. Approximated from content shape (more `failure_recovery` entries than `prerequisites` reads as failure_recovery-oriented) rather than adding a schema field for one ordering heuristic.
+- `attribution.attribute_credit`'s lexical-overlap credit split is explicitly a heuristic standing in for a real "did the agent follow this guidance" signal that doesn't exist. Both are documented in their own module docstrings, not just here.
+
+**Acceptance, verified with fakes (`DummyLM` for every `dspy.Module`; no Docker/LLM, same constraint as §1/§5/§6):**
+- `tests/test_retriever.py`: empty-library and non-active-skill exclusion, task_type filtering, ranking, and the track-record-override case above.
+- `tests/test_activation.py`: caching (including cache-scoping per repo), and both precedence rules independently.
+- `tests/test_retrieval_adapter.py`: adaptation rewrites only `procedure`, leaves `activation`/`verification`/`failure_recovery` untouched.
+- `tests/test_safety_gate.py`: blocks the obvious destructive patterns, allows benign and scoped-destructive (`rm -rf ./build`) commands.
+- `tests/test_bundles.py`, `tests/test_attribution.py`: storage round-trip / subset matching; credit favors the skill whose wording a trace's tool calls actually resemble, splits evenly on zero overlap.
+- `tests/test_injection.py`: the full chain — happy path, empty retrieval, failed activation, safety-blocked adaptation, and the `max_injected` cap actually respecting precedence order — five paths, not just the happy one.
+- `tests/test_p5_integration.py`: `build_injection()`'s result reaching `TraceCollector.system_prompt` for real, and a `None` result leaving the prompt byte-identical to the unassisted baseline.
 
 ## 8. Sequencing and dependencies
 
@@ -248,19 +300,24 @@ P1 (extract_skills)
    │  candidate drafts
    ▼
 P2 (Librarian, storage, index)
-   │  status="candidate" skills on disk
+   │  status="candidate" skills on disk; index also seeded for P5's reuse
    ▼
-P3 (gepa_runner, promotion_gate)  ── needs skill_injection.py (P5 stub) to run evaluate()
-   │  winning candidate, structurally sound + contradiction-free
+P3 (gepa_runner, promotion_gate)  ── uses evolution/skill_injection.py's fixed-candidate
+   │  winning candidate, structurally sound + contradiction-free    injection to score itself
    ▼
 P4 (validation/promotion.py, regression.py, shadow.py)  ── needs P2's promote()/rollback()
    │  status="active" skill (real gate: in-domain held-out + cross-domain regression + cost)
    ▼
-(closed loop: active skill's injected runs produce new traces → back to P1;
+P5 (retriever, activation, adapter, injection)  ── needs P2's active-status skills + index,
+   │  system_prompt_addendum for a real task            and P4 to have produced any to retrieve
+   ▼
+(closed loop: TraceCollector runs with P5's injection → new trace →
+ back to P1, tagged with which skill(s)/version were active via injection.render_addendum;
+ attribution.attribute_credit() splits outcome credit across co-active skills;
  live monitoring can call validation/rollback.py independent of this offline loop)
 ```
 
-Build strictly in this order — P2's `Librarian` needs real candidate drafts from P1 to have anything to decide on, P3's `evaluate()` needs P2's storage format to read/write skill versions, and P4's `evaluate_promotion()` needs both P2's `promote()`/`active_version()` and P3's winning candidate to have something to gate.
+Build strictly in this order — P2's `Librarian` needs real candidate drafts from P1 to have anything to decide on, P3's `evaluate()` needs P2's storage format to read/write skill versions, P4's `evaluate_promotion()` needs both P2's `promote()`/`active_version()` and P3's winning candidate to have something to gate, and P5's `retrieve()` needs P4 to have actually promoted something to `active` before there's anything in the library worth retrieving.
 
 ## 9. Risks specific to this plan
 
@@ -268,3 +325,6 @@ Build strictly in this order — P2's `Librarian` needs real candidate drafts fr
 - **Small-sample overfitting:** a ~15–20 task pinned subset, split further into GEPA's optimization batch, P4's in-domain held-out set, and P4's regression suite, leaves very few tasks per skill in each bucket. §6's `validation/promotion.py` now runs the real two-gate check the spec calls for, which is a genuine improvement over M3's original single-batch smoke test — but a real regression *suite* with only a handful of tasks in it is still a weak instrument for catching a rare cross-domain regression; more tasks per skill matters more than a fancier check on few of them. This is a data problem §1's still-unpicked pinned task list needs to solve, not something §6's code can fix on its own.
 - **`ContainerToolRunner` security surface:** `docker exec`-ing model-generated bash into a container is still executing untrusted output; confirm Terminal-Bench's container isolation (network egress, resource limits) is sufficient for this use before pointing it at anything beyond the pinned task containers.
 - **GEPA cost accounting:** `gepa_runner.py` must pass explicit `max_metric_calls`/`max_reflection_cost` to `gepa.optimize()` per skill (native caps, not something to reconstruct after the fact) and log `GEPAResult.total_evals` alongside the run — if evolving one skill costs more than the task-completion gains it produces are worth, that's a §7 (spec) cost-metric regression the system should be able to see, not just a hidden expense.
+- **P5's retrieval quality is only as good as the hashing embedding it inherited from P2:** a bag-of-words hashing vectorizer can't capture true semantic similarity beyond shared vocabulary — a task phrased differently from a skill's `activation` text but semantically the same case will score low on the similarity component regardless of `track_record_weight`. Fine for proving the retrieval/ranking/activation/adaptation *mechanics* work (§7's tests do exactly that); a real embedding provider is a drop-in `embed_fn` swap (`skill_library/index.py`) whenever retrieval quality against real tasks needs to be assessed, not a design change.
+- **`safety_gate.check_adapted_text`'s pattern list is necessarily incomplete:** it catches the obviously destructive literal commands this project's authors thought of, not an exhaustive taxonomy. It is a last check before injection, not a substitute for the actual execution sandbox (`tool_handlers.py`/`container_tool_handlers.py`) — treat a pattern-list gap as expected, not as a reason to trust adapted text more than the sandbox already does.
+- **Nothing in P1-P5 is wired into a single running loop yet.** Each phase is built, tested, and integration-tested against its immediate neighbor (P1→P2, P3→P4, P5→`TraceCollector`) — but no top-level driver exists that, given a live task, actually calls `retrieval.build_injection()` → runs `TraceCollector` → feeds the resulting trace through `dspy_modules.p1_extraction.extract_skills()` → `skill_library.librarian` → periodically triggers `evolution.gepa_runner` → gates through `validation.promotion` → back to retrieval, on a real, continuously-running task stream. Building that orchestrator, and populating §1's still-unpicked pinned Terminal-Bench task list, are what stand between "every phase works" (true, as of this revision) and "the system actually runs and improves over time" (not yet attempted, and not attemptable in an environment without Docker or a live LLM key).
