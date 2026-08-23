@@ -1,0 +1,17 @@
+# Optional: only needed for trace_collection/tbench_adapter.py (running
+# TraceCollector against real Terminal-Bench task containers).
+#
+# terminal-bench requires Python >=3.12 (its own pyproject.toml), which is
+# stricter than this repo's core requirements.txt. If your interpreter is
+# older (this repo was built and tested against 3.11), install this into a
+# separate 3.12+ virtualenv rather than forcing the whole project onto a
+# newer Python:
+#
+#   python3.12 -m venv .venv-tbench
+#   .venv-tbench/bin/pip install -r requirements.txt -r requirements-tbench.txt
+#
+# trace_collection/container_tool_handlers.py itself has no hard runtime
+# dependency on terminal_bench (only a TYPE_CHECKING-guarded import), so it
+# stays importable and unit-testable under the core environment; only
+# trace_collection/tbench_adapter.py needs this file.
+terminal-bench>=0.2.18
