@@ -5,28 +5,47 @@ Scope for this plan: **P1 (Trajectory Segmentation and Extraction) → P2 (Skill
 
 ## 1. Trace corpus: Terminal-Bench
 
-Trace collection needs real, verifiably-scored tasks to be worth anything to P1/P3. [Terminal-Bench](https://www.tbench.ai) is the source for this plan:
+Trace collection needs real, verifiably-scored tasks to be worth anything to P1/P3. [Terminal-Bench](https://github.com/laude-institute/terminal-bench) is the source for this plan. **Status: built (`container_tool_handlers.py`, `tbench_adapter.py`), grounded in the real cloned source and import-verified against the actual installed package, but never run against a live container — see the caveats below before trusting it for real trace collection.**
 
-- Each task ships `instruction.md` (the task prompt), a `Dockerfile`/container environment, a reference solution, and a **pytest-based verification suite that checks final container state** (files, outputs, command effects) rather than the transcript.
-- That verification suite *is* `Trace.outcome_signal` (§4.1 of the spec): `{"kind": "test", "score": pass_fraction, "detail": pytest_output}` — no LLM-judge fallback needed for this corpus.
-- The Docker environment supplies `repo_context` (task domain: sysadmin, security, ML, scientific computing, etc., per Terminal-Bench's task taxonomy) for free.
+Confirmed against source, correcting this section's earlier (search-engine-sourced) guesses:
+- Each task directory (e.g. `original-tasks/<task-id>/`) has `task.yaml` (an `instruction:` field, not a separate `instruction.md`, plus `category`/`difficulty`/`tags`/`parser_name`/timeouts), `Dockerfile` + `docker-compose.yaml`, `run-tests.sh`, `tests/`, and `solution.sh`.
+- Verification is `run-tests.sh` executed inside the container, with its output parsed by a `parser_name`-selected parser (`terminal_bench.parsers.ParserFactory`; defaults to pytest, other parsers exist for swebench/mlebench/etc.) into a `dict[str, UnitTestStatus]` — this *is* `Trace.outcome_signal` (§4.1 of the spec): `{"kind": "test", "score": pass_fraction, "detail": "<test>=<passed|failed>, ..."}`. No LLM-judge fallback needed for this corpus.
+- `task.category`/`task.tags` supply `repo_context` (task domain: system-administration, security, etc.) for free.
+- Terminal-Bench's own agents interact with the container through a **tmux session** (`terminal_bench.terminal.tmux_session.TmuxSession`: send keystrokes, block until a `tmux wait` sentinel, capture the pane), not a plain `docker exec` per command. This is genuinely a better match for Claude's `bash_20250124` tool than `tool_handlers.SandboxedToolRunner`'s per-call `subprocess.run` — a tmux session, like the real bash tool, persists env vars/cwd/background jobs across calls; the existing local runner doesn't.
 
-**Integration change required:** `trace_collection/tool_handlers.py`'s `SandboxedToolRunner` currently runs bash via local `subprocess`, confined to a directory. Terminal-Bench tasks run inside per-task Docker containers. Add a sibling runner:
+**Built as:**
 
 ```
 trace_collection/
-  tool_handlers.py         # unchanged: SandboxedToolRunner (local dir) — kept for fast dev iteration
-  container_tool_handlers.py   # NEW: ContainerToolRunner — same interface, execs into a running
-                                 # Terminal-Bench task container (`docker exec`) instead of subprocess
-  tbench_adapter.py            # NEW: given a Terminal-Bench task id, starts its container, runs
-                                 # TraceCollector.run() against it via ContainerToolRunner, tears the
-                                 # container down, and runs the task's pytest verification to fill
-                                 # Trace.outcome_signal before saving
+  tool_handlers.py            # unchanged: SandboxedToolRunner (local dir) — kept for fast dev iteration
+  container_tool_handlers.py    # NEW: ContainerToolRunner. bash tool -> TmuxSession.send_keys(block=True)
+                                  # + get_incremental_output(); text-editor tool -> session.container.exec_run
+                                  # / session.copy_to_container directly (bypasses tmux -- structured file
+                                  # I/O doesn't need to appear in the recorded terminal transcript). Only
+                                  # imports terminal_bench under TYPE_CHECKING, so it has no hard runtime
+                                  # dependency on the package and stays unit-testable (tests/test_
+                                  # container_tool_handlers.py, a fake-session double, no Docker needed) in
+                                  # the same environment as everything else.
+  tbench_adapter.py               # NEW: run_tbench_task(tasks_dir, task_id, ...) -- loads the task via
+                                    # terminal_bench.handlers.trial_handler.TrialHandler, starts its
+                                    # container via terminal_bench.terminal.terminal.spin_up_terminal, runs
+                                    # TraceCollector against a ContainerToolRunner-backed session, then
+                                    # reuses Terminal-Bench's own test-copy + run-tests.sh invocation +
+                                    # ParserFactory-selected parser for verification (not a reimplementation)
+                                    # to fill Trace.outcome_signal. Has a real terminal_bench runtime
+                                    # dependency, unlike container_tool_handlers.py.
 ```
 
-`collector.py`'s `TraceCollector` itself does not need to change — it already takes a tool runner and a task string; `tbench_adapter.py` just supplies a `ContainerToolRunner` and a task pulled from Terminal-Bench instead of an arbitrary CLI string.
+**Correction to this plan's earlier assumption:** it said "`collector.py`'s `TraceCollector` doesn't need to change." Checking the actual code showed it hardcoded `self.tools = SandboxedToolRunner(workdir)` in `__init__` — there was no way to inject a different runner. Fixed by adding optional `tool_runner`/`tool_defs` constructor params (default behavior for the existing `collect` CLI path is unchanged; verified via the existing test suite plus a manual construction check). `tbench_adapter.py` passes `tool_runner=ContainerToolRunner(...)` and a descriptive `workdir="container:<name>"` string (used only for `Trace.workdir` reporting, since there's no local directory).
 
-**Pinned subset, not the full suite:** start with a fixed, versioned list of ~15–20 Terminal-Bench task ids spanning 2–3 domains (e.g., a handful of sysadmin + a handful of scripting/debugging tasks) rather than all ~89. Reasons: (a) each task is a fresh Docker container — full-suite runs are slow and costly to iterate on; (b) P1/P2 need *repeated* structurally-similar tasks to prove segmentation/dedup work, which a hand-picked, domain-clustered subset gives more reliably than a random full sweep. Record the pinned list in `eval/tbench_task_ids.txt` so later phases (P4's real held-out/regression split) can extend it without ambiguity about what's already been seen.
+**New environment constraint, discovered while building this, not anticipated in the original plan:** the `terminal-bench` PyPI package requires **Python ≥3.12** (confirmed: `pip install terminal-bench` is flatly rejected under 3.11 — "Requires-Python >=3.12"). This repo's core `requirements.txt` (dspy/gepa/anthropic) has no such constraint. Keep them decoupled — `requirements-tbench.txt` is a separate, optional file with this spelled out, meant to be installed into its own 3.12+ virtualenv rather than forcing the whole project onto a newer interpreter. `container_tool_handlers.py`'s `TYPE_CHECKING`-only import of `TmuxSession` is what keeps it usable outside that venv.
+
+**What was actually verified, and what wasn't (no Docker daemon in the environment that built this):**
+- ✅ `container_tool_handlers.py`'s tool logic (path resolution, `view`/`create`/`str_replace`/`insert`, bash command wrapping) — unit-tested against a fake session double, 14/14 passing.
+- ✅ Both new modules' imports, and every `terminal_bench` class/method signature they call (`TrialHandler.__init__`, `spin_up_terminal`, `TmuxSession.send_keys`/`copy_to_container`/`capture_pane`/`get_incremental_output`/`clear_history`, `DockerComposeManager.CONTAINER_TEST_DIR`) — checked by reading the real cloned source, then confirmed by installing the actual `terminal-bench` package into a Python 3.12 venv and importing both modules against it successfully.
+- ❌ An actual container run: starting a real task container, running the agent loop through a live `TmuxSession`, copying in `tests/`, running `run-tests.sh`, and parsing real results. **Nothing here has executed against Docker.** Treat `tbench_adapter.py` as spec-accurate, not battle-tested — run it against one real task before trusting its output for anything.
+
+**Pinned subset, not the full suite — still to do, needs a live run to curate responsibly:** the original plan called for a fixed, versioned list of ~15–20 Terminal-Bench task ids in `eval/tbench_task_ids.txt`, spanning 2–3 domains, chosen so P1/P2 see *repeated* structurally-similar tasks. That selection wasn't made — picking specific task ids without ever having run one, in an environment that can't run one, would be guessing, not curating. Do this once Docker + Python 3.12 are available: run a handful of candidate tasks, confirm they complete and produce sensible traces, then pin the list.
 
 ## 2. Dependencies
 

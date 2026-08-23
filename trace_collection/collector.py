@@ -38,29 +38,42 @@ def _now() -> str:
 
 class TraceCollector:
     """Runs one task to completion against the real Claude API and returns
-    a structured Trace of the whole session."""
+    a structured Trace of the whole session.
+
+    Defaults to a local SandboxedToolRunner confined to workdir. Pass
+    tool_runner explicitly (e.g. tbench_adapter.py's ContainerToolRunner) to
+    run the same agentic loop against a different execution environment --
+    anything satisfying tool_handlers.SandboxedToolRunner's
+    .run(name, tool_input) -> (output, is_error) interface works.
+    """
 
     def __init__(
         self,
-        workdir: str,
+        workdir: str | None = None,
         model: str = DEFAULT_MODEL,
         max_turns: int = DEFAULT_MAX_TURNS,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         client: anthropic.Anthropic | None = None,
+        tool_runner: Any | None = None,
+        tool_defs: list[dict[str, Any]] | None = None,
     ):
+        if tool_runner is None and workdir is None:
+            raise ValueError("workdir is required unless tool_runner is supplied")
+
+        self.workdir = workdir
         self.model = model
         self.max_turns = max_turns
         self.max_tokens = max_tokens
         self.client = client or anthropic.Anthropic()
-        self.tools = SandboxedToolRunner(workdir)
-        self.tool_defs = [BASH_TOOL, TEXT_EDITOR_TOOL]
+        self.tools = tool_runner if tool_runner is not None else SandboxedToolRunner(workdir)
+        self.tool_defs = tool_defs if tool_defs is not None else [BASH_TOOL, TEXT_EDITOR_TOOL]
 
     def run(self, task: str) -> Trace:
         trace = Trace(
             trace_id=new_trace_id(),
             task=task,
             model=self.model,
-            workdir=str(self.tools.workdir),
+            workdir=str(self.workdir) if self.workdir is not None else str(getattr(self.tools, "workdir", "unknown")),
             started_at=_now(),
         )
 
