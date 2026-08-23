@@ -166,3 +166,72 @@ def test_skill_to_markdown_handles_empty_lists_gracefully(tmp_path):
     md = skill_to_markdown(skill)
     assert "(none)" in md
     assert "(none observed)" in md
+
+
+def test_promote_activates_a_candidate_with_no_prior_active_version(tmp_path):
+    library = SkillLibrary(tmp_path)
+    library.create(_draft(), skill_id="test-skill")
+    assert library.active_version("test-skill") is None
+
+    promoted = library.promote("test-skill", 1)
+
+    assert promoted.status == "active"
+    assert library.active_version("test-skill") == 1
+    assert library.read("test-skill").version == 1
+
+
+def test_promote_demotes_previous_active_to_deprecated(tmp_path):
+    library = SkillLibrary(tmp_path)
+    library.create(_draft(), skill_id="test-skill")
+    library.promote("test-skill", 1)
+    library.revise("test-skill", _draft(procedure="sharper procedure"))
+
+    library.promote("test-skill", 2)
+
+    assert library.active_version("test-skill") == 2
+    v1 = library.read("test-skill", version=1)
+    assert v1.status == "deprecated"
+
+
+def test_promote_unknown_version_raises(tmp_path):
+    library = SkillLibrary(tmp_path)
+    library.create(_draft(), skill_id="test-skill")
+    with pytest.raises(SkillLibraryError):
+        library.promote("test-skill", 99)
+
+
+def test_rollback_swaps_active_and_deprecated(tmp_path):
+    library = SkillLibrary(tmp_path)
+    library.create(_draft(), skill_id="test-skill")
+    library.promote("test-skill", 1)
+    library.revise("test-skill", _draft(procedure="a regression"))
+    library.promote("test-skill", 2)
+
+    rolled_back = library.rollback("test-skill")
+
+    assert rolled_back.version == 1
+    assert library.active_version("test-skill") == 1
+    v2 = library.read("test-skill", version=2)
+    assert v2.status == "deprecated"
+
+
+def test_rollback_with_no_deprecated_version_raises(tmp_path):
+    library = SkillLibrary(tmp_path)
+    library.create(_draft(), skill_id="test-skill")
+    library.promote("test-skill", 1)
+    with pytest.raises(SkillLibraryError):
+        library.rollback("test-skill")
+
+
+def test_rollback_twice_is_reversible(tmp_path):
+    library = SkillLibrary(tmp_path)
+    library.create(_draft(), skill_id="test-skill")
+    library.promote("test-skill", 1)
+    library.revise("test-skill", _draft(procedure="v2"))
+    library.promote("test-skill", 2)
+
+    library.rollback("test-skill")
+    assert library.active_version("test-skill") == 1
+
+    library.rollback("test-skill")  # rolling back the rollback
+    assert library.active_version("test-skill") == 2

@@ -1,7 +1,7 @@
-# Implementation Plan: P1 → P2 → P3
+# Implementation Plan: P1 → P2 → P3 → P4
 
-Status: draft v0.1 · converts `PROJECT_SPEC.md` into a sequenced, buildable plan
-Scope for this plan: **P1 (Trajectory Segmentation and Extraction) → P2 (Skill-Library Maintenance) → P3 (Weight-Free Skill Evolution via GEPA)**. P4 (full validation/regression harness) and P5 (retrieval/activation/adaptation) are **not** built out here beyond the minimal stubs P3 needs to close its own loop — see §6.
+Status: converts `PROJECT_SPEC.md` into a sequenced, buildable plan; P1-P4 built, tested, and documented as of this revision.
+Scope for this plan: **P1 (Trajectory Segmentation and Extraction) → P2 (Skill-Library Maintenance) → P3 (Weight-Free Skill Evolution via GEPA) → P4 (Safe Validation and Regression Control)**. P5 (real retrieval/activation/adaptation) is **not** built out here beyond the minimal stub P3 needed to close its own loop — see §7.
 
 ## 1. Trace corpus: Terminal-Bench
 
@@ -120,11 +120,11 @@ skill_library/
 - Every decision path (`Librarian` calls and `sweep_retirements()` alike) skips any skill with `pinned=True` before doing anything else — no `REVISE`/`MERGE`/`SPECIALIZE`/`RETIRE` ever touches a pinned skill. `storage.py` needs a `pin`/`unpin` entrypoint; nothing automated ever flips that flag.
 - `Librarian` only ever proposes actions against skills with non-empty `provenance.source_trace_ids` (i.e., skills `extract_skills` produced). If the library is later seeded with any hand-authored skill, it has no `source_trace_ids` and is invisible to `Librarian`'s decision path by construction — it's a human's file to edit directly.
 
-**No auto-write to `active`:** every `CREATE`/`REVISE`/`MERGE`/`SPECIALIZE` output from `Librarian` is written with `status="candidate"`, never directly overwriting a `status="active"` skill. In this plan's scope (no full P4 yet), promotion to `active` uses the **lite gate** described in §6 — this is the one place P2 depends on something from P3/§6 rather than the reverse.
+**No auto-write to `active`:** every `CREATE`/`REVISE`/`MERGE`/`SPECIALIZE` output from `Librarian` is written with `status="candidate"`, never directly overwriting a `status="active"` skill. Promotion to `active` goes through P4's real gate (§6: `validation/promotion.py`'s `evaluate_promotion()`, which is what actually calls `SkillLibrary.promote()`) — this is the one place P2 depends on something from P3/P4 rather than the reverse.
 
 **Acceptance criteria (M2):**
 - Feed drafts from 2+ Terminal-Bench traces that hit the *same* underlying pattern (e.g., two different tasks both requiring a similar diagnostic-then-fix procedure): `Librarian` proposes `MERGE` or `REVISE`, not two independent `CREATE`s — verified by hand on this constructed pair before trusting it on the full pinned set.
-- Feed a draft with no existing overlap: `Librarian` proposes `CREATE` and it's `status="candidate"` on disk (`SKILL.md` + `metadata.json`) but the library's `active` set is unchanged until the lite gate (§6) runs.
+- Feed a draft with no existing overlap: `Librarian` proposes `CREATE` and it's `status="candidate"` on disk (`SKILL.md` + `metadata.json`) but the library's `active` set is unchanged until P4's gate (§6) runs.
 - `index.py`'s nearest-neighbor lookup returns the constructed near-duplicate pair above as each other's top match (basic retrieval sanity check, reused later for P5).
 
 ## 5. Phase P3 — Weight-Free Evolution via GEPA
@@ -148,7 +148,9 @@ evolution/
   adapter.py             # SkillGEPAAdapter(gepa.GEPAAdapter): evaluate() + make_reflective_dataset()
   gepa_runner.py            # batch entrypoint: given a skill_id and a task subset it applies to,
                               # run gepa.optimize(...) with SkillGEPAAdapter, get back a candidate
-  promotion_gate.py           # lite validation gate — see §6
+  promotion_gate.py           # cheap structural/edit-size/contradiction pre-filter, run before
+                                # the real P4 gate (§6) spends a full in-domain + regression suite
+                                # run on a candidate — see §7
 ```
 
 **Candidate encoding:** `gepa`'s `Candidate` type is `dict[str, str]` — values must be plain strings, but `prerequisites` and `failure_recovery` are `list[str]` in the Skill schema (§4.3 of the spec). `adapter.py` needs a `skill_to_candidate(skill) -> dict[str,str]` / `candidate_to_skill_fields(candidate) -> dict` pair that (de)serializes each list field to/from a single newline- or bullet-joined string component, so the three optimized components are literally `{"procedure": str, "prerequisites": str, "failure_recovery": str}`.
@@ -170,20 +172,76 @@ evolution/
 **Acceptance criteria (M3): met, with one substitution.**
 - ✅ End-to-end demonstration: seed skill v1 → `gepa_runner.evolve_skill()` with a real train/val split → `GEPAResult` whose best candidate's `val_aggregate_scores` (1.0) beats v1's (0.0) on `valset` → `promotion_gate.promote()` passes it (`tests/test_gepa_runner.py`). `valset` is scored by GEPA itself throughout the run, exactly as planned — no separate re-run constructed.
 - ✅ `promotion_gate.py` demonstrably rejects deliberately-bad candidates in tests: empty `procedure`, empty `prerequisites`, `activation` over 60 chars, a wholesale rewrite exceeding the changed-lines cap, and (via a `DummyLM`-scripted `has_contradiction=True`) a flagged contradiction — all in `tests/test_promotion_gate.py`.
-- **Substitution, not a gap:** "one skill from the pinned set" used a fake `run_task_fn` and fake `reflection_lm` instead of real Terminal-Bench tasks and a real LLM, because neither Docker nor a usable API key was available in the environment that built this (same constraint noted in §1). The GEPA *mechanics* (candidate proposal → evaluation → acceptance → Pareto tracking → promotion gate) are genuinely verified; the *quality* of real reflective proposals and real task scoring is not — that needs an environment with both, per §8's risks.
+- **Substitution, not a gap:** "one skill from the pinned set" used a fake `run_task_fn` and fake `reflection_lm` instead of real Terminal-Bench tasks and a real LLM, because neither Docker nor a usable API key was available in the environment that built this (same constraint noted in §1). The GEPA *mechanics* (candidate proposal → evaluation → acceptance → Pareto tracking → promotion gate) are genuinely verified; the *quality* of real reflective proposals and real task scoring is not — that needs an environment with both, per §9's risks.
 
-## 6. What's deliberately a stub here, and why
+## 6. Phase P4 — Safe Validation and Regression Control
 
-This plan's P3 needs *something* that puts a skill's text into a running agent to score it — that's unavoidably a sliver of P5 (retrieval/activation/adaptation) and a sliver of P4 (validation/promotion). Both are built **only to the minimum P3 needs**, not to the spec's full design:
+**Status: built (`validation/`) and verified against real P1→P2→P3 output** — `tests/test_p3_to_p4_integration.py` runs an actual `gepa.optimize()` result through `SkillLibrary.revise()` and into `evaluate_promotion()`, which genuinely promotes it (flips `status: candidate → active`, demotes the incumbent to `deprecated`). This closes a real gap the P1-P3 plan left open: P3's `promotion_gate.py` (§5) only ever returned a pass/fail `GateResult` — nothing in P1-P3 ever actually wrote a promotion to storage. `SkillLibrary` gained the two methods that make that real:
+
+- `promote(skill_id, version)` — flips a version to `active`, demotes any other currently-active version of the same `skill_id` to `deprecated` (kept on disk, not archived, so it's the target `rollback()` finds).
+- `rollback(skill_id)` — swaps the active version back to the most recent `deprecated` one, demoting the current active in turn. A swap, not a delete: rolling back a rollback un-does it.
+
+**New module:** `validation/`
+```
+validation/
+  __init__.py
+  eval_runner.py    # run_suite(skill, task_ids, run_task_fn, suite) -> list[EvaluationRecord],
+                      # aggregate_score()/aggregate_cost(). Reuses evolution.adapter's
+                      # skill_to_candidate/candidate_to_skill_fields encoding so a skill scored
+                      # here and one scored inside P3's evaluate() see byte-identical injected
+                      # text -- no drift between "how P3 scored a candidate" and "how P4 re-scores
+                      # it". Never raises for a single task's failure, same contract as P3.
+  regression.py       # check_regression(candidate, baseline, task_ids, run_task_fn, epsilon,
+                        # cost_tolerance) -- runs BOTH the candidate and the current active
+                        # version (the baseline) against a fixed cross-domain task set; fails on
+                        # either a score drop beyond epsilon or a per-cost-key (input_tokens,
+                        # output_tokens, tool_calls) increase beyond cost_tolerance. The spec's
+                        # "a skill that improves success by making the agent try much harder is a
+                        # regression on cost" is a literal per-key check, not a single blended score.
+  promotion.py          # evaluate_promotion(library, skill_id, candidate_version,
+                          # in_domain_task_ids, regression_task_ids, run_task_fn, margin,
+                          # first_promotion_floor, epsilon, cost_tolerance) -> PromotionDecision.
+                          # Runs the in-domain held-out check (candidate >= predecessor + margin)
+                          # THEN the regression check, in that order (cheaper check first);
+                          # library.promote() only on both passing. On rejection: the failing
+                          # EvaluationRecords and a rejection note are attached to the candidate's
+                          # own provenance via a new SkillLibrary.save() (metadata.json only,
+                          # doesn't bump version) -- visible on disk for the next GEPA batch or a
+                          # human, not just returned and discarded.
+  shadow.py              # ShadowLedger: per-skill_id@version JSON files of (task_id, score)
+                          # observations, is_promotion_eligible(min_observations, min_success_rate)
+                          # -- the concrete proxy this plan uses for spec §5.4's "N tasks or until
+                          # statistical confidence" (a real confidence-interval computation would
+                          # tighten the threshold, not change the shape of the check). Gates
+                          # whether evaluate_promotion() is even worth running, not a promotion
+                          # decision itself.
+  rollback.py             # rollback_if_regressed(library, skill_id, live_success_rate,
+                           # baseline_success_rate, observed_count, min_observations, epsilon) --
+                           # calls library.rollback() when LIVE (not offline-suite) monitoring
+                           # detects a regression, gated by its own observation-count floor so a
+                           # rollback isn't decided on a handful of unlucky tasks.
+```
+
+**First-promotion policy (a design decision the spec doesn't fully pin down):** the spec's promotion rule is phrased relative to "the predecessor," but a skill's very first candidate version has no predecessor to regress against. `evaluate_promotion()` handles this as a distinct branch: no active version yet → skip the regression suite entirely (nothing to compare) and require the candidate clear an absolute `first_promotion_floor` on the in-domain set instead of the relative `margin`. Kept as two separate parameters on purpose — one is a floor, one is a margin over a moving baseline, and conflating them would silently change semantics depending on whether a skill happens to have a predecessor yet.
+
+**Acceptance, verified with fakes (no Docker/LLM in this environment — same constraint as §1/§5):**
+- `tests/test_storage.py`: `promote()`/`rollback()` correctly flip status, demote in the right direction, and are swap-reversible.
+- `tests/test_regression.py`: fails on a score drop beyond epsilon, fails on a per-cost-key blowup beyond tolerance, tolerates small variation within both.
+- `tests/test_promotion.py`: first-promotion floor, margin-based rejection, and — the one that actually matters most — rejection **on regression even when the in-domain score improved**, proving the two gates are independent, not just the first one gating a rubber-stamped second check.
+- `tests/test_shadow.py` / `tests/test_rollback.py`: eligibility thresholds and rollback's observation-count floor.
+- `tests/test_p3_to_p4_integration.py`: the full chain, end to end, using the same fake-`reflection_lm` + fake-`run_task_fn` substitution documented in §5 — genuinely exercises the P1(schema)→P2(storage)→P3(evolve)→P4(promote) pipeline's wiring, not real-world validation quality.
+
+## 7. What's still a stub, and why
+
+P3 and P4 both needed *something* that puts a skill's text into a running agent to score it — that's a sliver of P5 (retrieval/activation/adaptation), built only to the minimum P3/P4 need, not the spec's full design:
 
 | Full spec component | What this plan builds instead | Gap left for later |
 |---|---|---|
-| P5 retrieval (embedding+BM25+metadata ranking) | `skill_injection.py`: direct, hardcoded injection of one named skill — no ranking, no multi-skill composition, no `ApplicabilityChecker` | Real retrieval, activation-condition checking, adaptation to repo-concrete specifics, runtime safety gate (spec §5.5) |
-| P4 validation (in-domain held-out + system regression suites, shadow rollout) | `promotion_gate.py`: structural checks + contradiction check + a single held-out batch within the same skill's task set | Cross-domain system regression suite, cost-regression checks, shadow-mode rollout, rollback mechanics (spec §5.4) |
+| P5 retrieval (embedding+BM25+metadata ranking, `ApplicabilityChecker`, adaptation, runtime safety gate) | `evolution/skill_injection.py`: direct, hardcoded injection of one named skill — no ranking, no multi-skill composition, no applicability check, no repo-concrete adaptation | Real retrieval, activation-condition checking, adaptation to repo-concrete specifics, runtime safety gate (spec §5.5) |
 
-Treat `skill_injection.py` and `promotion_gate.py` as throwaway-if-needed scaffolding: when P4/P5 are actually built out, they should absorb and generalize these, not sit alongside them as a permanent second path.
+Treat `skill_injection.py` as throwaway-if-needed scaffolding: when P5 is actually built out, it should absorb and generalize this, not sit alongside it as a permanent second path. (P4 itself is no longer in this table — it was a stub in the original P1-P3 plan, `promotion_gate.py`'s structural+contradiction check standing in for the whole thing; §6 above replaces that stub with the real regression suite, shadow rollout, and rollback the spec calls for. `promotion_gate.py` still has a real job: it's the cheap, fast pre-filter `gepa_runner.evolve_skill()`'s winning candidate passes through *before* the much more expensive `validation/promotion.py` pipeline runs full in-domain + regression suites against it.)
 
-## 7. Sequencing and dependencies
+## 8. Sequencing and dependencies
 
 ```
 P1 (extract_skills)
@@ -193,16 +251,20 @@ P2 (Librarian, storage, index)
    │  status="candidate" skills on disk
    ▼
 P3 (gepa_runner, promotion_gate)  ── needs skill_injection.py (P5 stub) to run evaluate()
-   │  status="active" skills (lite-gated)
+   │  winning candidate, structurally sound + contradiction-free
    ▼
-(closed loop: active skill's injected runs produce new traces → back to P1)
+P4 (validation/promotion.py, regression.py, shadow.py)  ── needs P2's promote()/rollback()
+   │  status="active" skill (real gate: in-domain held-out + cross-domain regression + cost)
+   ▼
+(closed loop: active skill's injected runs produce new traces → back to P1;
+ live monitoring can call validation/rollback.py independent of this offline loop)
 ```
 
-Build strictly in this order — P2's `Librarian` needs real candidate drafts from P1 to have anything to decide on, and P3's `evaluate()` needs P2's storage format to read/write skill versions.
+Build strictly in this order — P2's `Librarian` needs real candidate drafts from P1 to have anything to decide on, P3's `evaluate()` needs P2's storage format to read/write skill versions, and P4's `evaluate_promotion()` needs both P2's `promote()`/`active_version()` and P3's winning candidate to have something to gate.
 
-## 8. Risks specific to this plan
+## 9. Risks specific to this plan
 
 - **Terminal-Bench container cost/time:** each `evaluate()` call in P3 spins up a fresh Docker container per task in the batch; GEPA's iterative reflection loop multiplies this. Budget for it explicitly (small batches, capped GEPA iterations) before scaling the pinned task list.
-- **Small-sample overfitting in the lite gate:** a ~15–20 task pinned subset, split further into optimization vs. held-out batches per skill, leaves very few tasks per skill. M3's "v2 beats v1 on a fresh batch" result should be read as a smoke test, not evidence of real generalization — that's exactly what full P4 (§6 gap) exists to fix later.
+- **Small-sample overfitting:** a ~15–20 task pinned subset, split further into GEPA's optimization batch, P4's in-domain held-out set, and P4's regression suite, leaves very few tasks per skill in each bucket. §6's `validation/promotion.py` now runs the real two-gate check the spec calls for, which is a genuine improvement over M3's original single-batch smoke test — but a real regression *suite* with only a handful of tasks in it is still a weak instrument for catching a rare cross-domain regression; more tasks per skill matters more than a fancier check on few of them. This is a data problem §1's still-unpicked pinned task list needs to solve, not something §6's code can fix on its own.
 - **`ContainerToolRunner` security surface:** `docker exec`-ing model-generated bash into a container is still executing untrusted output; confirm Terminal-Bench's container isolation (network egress, resource limits) is sufficient for this use before pointing it at anything beyond the pinned task containers.
 - **GEPA cost accounting:** `gepa_runner.py` must pass explicit `max_metric_calls`/`max_reflection_cost` to `gepa.optimize()` per skill (native caps, not something to reconstruct after the fact) and log `GEPAResult.total_evals` alongside the run — if evolving one skill costs more than the task-completion gains it produces are worth, that's a §7 (spec) cost-metric regression the system should be able to see, not just a hidden expense.

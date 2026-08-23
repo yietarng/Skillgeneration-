@@ -244,6 +244,15 @@ class SkillLibrary:
         (version_dir / "SKILL.md").write_text(skill_to_markdown(skill))
         return skill
 
+    def save(self, skill: Skill) -> Skill:
+        """Public entrypoint for overwriting an already-created version's
+        content in place -- e.g. validation/promotion.py attaching
+        rejection evidence to a candidate that didn't clear the gate.
+        Unlike revise(), this does not bump the version or touch status."""
+        if not self.exists(skill.skill_id):
+            raise SkillLibraryError(f"Unknown skill_id: {skill.skill_id}")
+        return self._write(skill)
+
     def _unique_slug(self, text: str) -> str:
         base = _slugify(text)
         candidate = base
@@ -318,6 +327,61 @@ class SkillLibrary:
         self._write(merged)
         self.archive(secondary_skill_id)
         return merged
+
+    # -- promote/rollback (P4) -----------------------------------------------
+
+    def _set_status(self, skill_id: str, version: int, status: str) -> None:
+        meta_path = self._version_dir(skill_id, version) / "metadata.json"
+        if not meta_path.exists():
+            raise SkillLibraryError(f"No such skill/version: {skill_id}@{version}")
+        data = json.loads(meta_path.read_text())
+        data["status"] = status
+        meta_path.write_text(json.dumps(data, indent=2))
+
+    def active_version(self, skill_id: str) -> int | None:
+        """The currently active version, or None if this skill has never
+        been promoted (only candidates/deprecated versions exist)."""
+        for version in self.list_versions(skill_id):
+            meta = json.loads((self._version_dir(skill_id, version) / "metadata.json").read_text())
+            if meta.get("status") == "active":
+                return version
+        return None
+
+    def promote(self, skill_id: str, version: int) -> Skill:
+        """Flip version to "active". Any other currently-active version of
+        this skill_id is demoted to "deprecated" -- kept on disk (not
+        archived), so rollback() can find it. This is the write P3's
+        promotion_gate.promote() (a pass/fail check, nothing more) never
+        performed itself -- validation/promotion.py (P4) calls this only
+        after both the in-domain held-out and regression gates pass."""
+        if not (self._version_dir(skill_id, version) / "metadata.json").exists():
+            raise SkillLibraryError(f"No such skill/version: {skill_id}@{version}")
+        previous_active = self.active_version(skill_id)
+        if previous_active is not None and previous_active != version:
+            self._set_status(skill_id, previous_active, "deprecated")
+        self._set_status(skill_id, version, "active")
+        return self.read(skill_id, version)
+
+    def rollback(self, skill_id: str) -> Skill:
+        """Revert to the most recent "deprecated" version -- spec §5.4:
+        "keep the immediate predecessor pinned and retrievable for fast
+        rollback." The current active version is demoted to "deprecated" in
+        turn, so rollback is a swap, not a delete: a bad rollback is itself
+        reversible by rolling back again."""
+        current_active = self.active_version(skill_id)
+        deprecated_versions = [
+            v
+            for v in self.list_versions(skill_id)
+            if json.loads((self._version_dir(skill_id, v) / "metadata.json").read_text()).get("status")
+            == "deprecated"
+        ]
+        if not deprecated_versions:
+            raise SkillLibraryError(f"No deprecated version to roll back to for '{skill_id}'")
+        target = max(deprecated_versions)
+        if current_active is not None:
+            self._set_status(skill_id, current_active, "deprecated")
+        self._set_status(skill_id, target, "active")
+        return self.read(skill_id, target)
 
     # -- pin/unpin ---------------------------------------------------------
 
