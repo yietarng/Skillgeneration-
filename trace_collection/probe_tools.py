@@ -11,8 +11,11 @@ only inspecting files that already exist in the traced workdir.
 from __future__ import annotations
 
 import fnmatch
+import os
 from pathlib import Path
 from typing import Any
+
+_SKIPPED_DIRS = {".git", ".hg", ".svn"}
 
 VIEW_FILE_TOOL = {
     "name": "view_file",
@@ -122,21 +125,31 @@ class ReadOnlyProbeRunner:
         root = self._resolve(tool_input.get("path", "."))
         glob = tool_input.get("glob")
         hits: list[str] = []
-        for file_path in sorted(root.rglob("*")):
+        for dirpath, dirnames, filenames in os.walk(root):
+            # Skip VCS metadata (its binary internals would otherwise crowd
+            # out real source hits) and never follow symlinked directories
+            # out of the sandboxed workdir.
+            dirnames[:] = sorted(
+                d for d in dirnames if d not in _SKIPPED_DIRS and not (Path(dirpath) / d).is_symlink()
+            )
+            for filename in sorted(filenames):
+                file_path = Path(dirpath) / filename
+                if file_path.is_symlink():
+                    continue
+                if glob and not fnmatch.fnmatch(filename, glob):
+                    continue
+                try:
+                    text = file_path.read_text(errors="ignore")
+                except OSError:
+                    continue
+                for line_no, line in enumerate(text.splitlines(), start=1):
+                    if query in line:
+                        rel = file_path.relative_to(self.workdir)
+                        hits.append(f"{rel}:{line_no}: {line.strip()[:200]}")
+                        if len(hits) >= _MAX_SEARCH_HITS:
+                            break
+                if len(hits) >= _MAX_SEARCH_HITS:
+                    break
             if len(hits) >= _MAX_SEARCH_HITS:
                 break
-            if not file_path.is_file():
-                continue
-            if glob and not fnmatch.fnmatch(file_path.name, glob):
-                continue
-            try:
-                text = file_path.read_text(errors="ignore")
-            except OSError:
-                continue
-            for line_no, line in enumerate(text.splitlines(), start=1):
-                if query in line:
-                    rel = file_path.relative_to(self.workdir)
-                    hits.append(f"{rel}:{line_no}: {line.strip()[:200]}")
-                    if len(hits) >= _MAX_SEARCH_HITS:
-                        break
         return "\n".join(hits) or "(no matches)"

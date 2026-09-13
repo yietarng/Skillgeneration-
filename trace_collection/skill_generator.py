@@ -194,7 +194,6 @@ def _probe(
         }
     ]
 
-    findings = ""
     for _ in range(max_turns):
         response = client.messages.create(
             model=model,
@@ -207,8 +206,7 @@ def _probe(
         tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
 
         if not tool_use_blocks:
-            findings = next((b.text for b in response.content if b.type == "text"), "")
-            break
+            return next((b.text for b in response.content if b.type == "text"), "")
 
         tool_results = []
         for block in tool_use_blocks:
@@ -217,7 +215,14 @@ def _probe(
                 {"type": "tool_result", "tool_use_id": block.id, "content": output, "is_error": is_error}
             )
         messages.append({"role": "user", "content": tool_results})
-    return findings
+
+    # Ran out of turns while still investigating -- surface that explicitly
+    # rather than silently discarding whatever was found so far.
+    return (
+        "PROBING INCOMPLETE: ran out of turns before reaching a conclusion. "
+        "Treat every uncertain claim as unverifiable and narrow scope or soften "
+        "wording rather than asserting any of them."
+    )
 
 
 def _commit(client: anthropic.Anthropic, model: str, candidate: dict, findings: str) -> dict:
@@ -265,8 +270,11 @@ def generate_skill(
 
     candidate = _propose(client, model, summaries, len(traces))
 
-    workdir = traces[0].get("workdir") if traces else None
-    can_probe = enable_probing and candidate["uncertain_claims"] and workdir and Path(workdir).is_dir()
+    workdir = next(
+        (t["workdir"] for t in traces if t.get("workdir") and Path(t["workdir"]).is_dir()),
+        None,
+    )
+    can_probe = enable_probing and candidate["uncertain_claims"] and workdir
     if not can_probe:
         return _finalize_unprobed(candidate)
 

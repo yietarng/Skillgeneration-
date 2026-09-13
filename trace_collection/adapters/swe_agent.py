@@ -100,7 +100,9 @@ def _extract_task(history: list[dict]) -> str:
     """SWE-agent's first user turn wraps the GitHub issue in interface
     instructions (and, for some trajectories, a prepended few-shot demo);
     pull out just the ISSUE body."""
-    first_user = next(h["content"] for h in history if h["role"] == "user")
+    first_user = next((h["content"] for h in history if h["role"] == "user"), None)
+    if first_user is None:
+        raise ValueError("Trajectory history has no user-role turn to extract a task from")
     match = re.search(r"ISSUE:\n(.*?)\n\nINSTRUCTIONS:", first_user, re.DOTALL)
     return match.group(1).strip() if match else first_user.strip()
 
@@ -224,19 +226,24 @@ def _materialize_workdir(source: dict, traj: dict, workdir: Path) -> bool:
 def fetch_all(out_dir: str, with_workdir: bool = True) -> list[Path]:
     """Download each source trajectory, convert it, materialize its workdir
     per its strategy, and write <out_dir>/<instance_id>/trace.json (+
-    workdir/ if materialized)."""
+    workdir/ if materialized). One source failing (a bad fetch, an
+    unexpectedly-shaped trajectory) is reported and skipped rather than
+    aborting sources that would otherwise succeed."""
     out_root = Path(out_dir)
     written = []
     for source in SOURCES:
-        traj = _fetch_json(f"{RAW_BASE}/{source['traj_path']}")
+        try:
+            traj = _fetch_json(f"{RAW_BASE}/{source['traj_path']}")
 
-        instance_dir = out_root / source["instance_id"]
-        workdir = instance_dir / "workdir"
-        got_workdir = with_workdir and _materialize_workdir(source, traj, workdir)
+            instance_dir = out_root / source["instance_id"]
+            workdir = instance_dir / "workdir"
+            got_workdir = with_workdir and _materialize_workdir(source, traj, workdir)
 
-        trace = convert_trajectory(traj, source["instance_id"], str(workdir) if got_workdir else None)
-        instance_dir.mkdir(parents=True, exist_ok=True)
-        trace_path = instance_dir / "trace.json"
-        trace_path.write_text(json.dumps(trace, indent=2))
-        written.append(trace_path)
+            trace = convert_trajectory(traj, source["instance_id"], str(workdir) if got_workdir else None)
+            instance_dir.mkdir(parents=True, exist_ok=True)
+            trace_path = instance_dir / "trace.json"
+            trace_path.write_text(json.dumps(trace, indent=2))
+            written.append(trace_path)
+        except Exception as exc:
+            print(f"Skipping {source['instance_id']}: {exc}")
     return written
