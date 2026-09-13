@@ -363,148 +363,45 @@ covered the CLI-facing functions that call into this module).
   (default `./traces`), `--model`, `--max-turns`, `--no-rebuild`. Runs the
   task, saves the trace via `save_trace`, prints outcome/score/turn count.
 
-### `trace_collection/probe_tools.py`
-
-Least-privilege, read-only tools used by `skill_generator.py`'s curator to
-check claims against the real environment a trace ran in — not the tools the
-traced agent itself used (that's `tool_handlers.py`/`container_tool_handlers.py`).
-
-`PROBE_TOOL_DEFS` = `[VIEW_FILE_TOOL, LIST_DIRECTORY_TOOL, SEARCH_FILES_TOOL]`
-(each a plain JSON-schema tool def — `view_file`, `list_directory`,
-`search_files`). No write or shell-execution tool exists here by design.
-
-- **`ReadOnlyProbeRunner(workdir: str)`** — `.run(name, tool_input) -> (str, bool)`
-  dispatches to `_view_file`/`_list_directory`/`_search_files`. `_resolve()`
-  hard-confines every path to `workdir` (raises `ProbeToolError` on escape).
-  `_search_files` walks with `os.walk`, skips `.git`/`.hg`/`.svn` and any
-  symlinked directory or file (both to keep VCS binary noise from crowding
-  out real hits and to prevent a symlink escaping the sandbox), capped at
-  `_MAX_SEARCH_HITS = 40` matches.
-
 ### `trace_collection/skill_generator.py`
 
-Implements the **propose → probe → commit** curation cycle from
-["Grounding Agent Memory: Environment-Probing Curation for Enterprise
-Agents"](https://arxiv.org/abs/2609.11060) (arXiv:2609.11060) — a
-self-contained alternative to P1/P2 that goes straight from trace(s) to one
-`SKILL.md`, with no library/versioning step. Kept alongside P1's real
-segmentation pipeline, not a replacement for it — see README.md's
-"Alternative: environment-probing curation" section for when to use which.
+The original, naive single-LLM-call skill distiller — kept as a fallback
+alongside P1's real segmentation pipeline, not removed. Calls the Claude API
+once per invocation with structured JSON-schema output; no segmentation, no
+abstraction judging, no multi-skill extraction from one trace.
 
-`DEFAULT_MODEL = "claude-opus-5"`, `DEFAULT_MAX_PROBE_TURNS = 6`.
-`PROPOSE_SCHEMA` adds an `uncertain_claims: list[str]` field over the
-original single-call schema; `COMMIT_SCHEMA` adds `action: "commit"|"skip"`,
-`skip_reason`, and `grounding_notes: [{claim, verdict, note}]`.
+`DEFAULT_MODEL = "claude-opus-5"`, `SKILL_GEN_SYSTEM` (system prompt: distill
+traces into one general, reusable Skill), `SKILL_OUTPUT_SCHEMA` (JSON schema
+for `skill_name`/`description`/`prerequisites`/`steps`/`pitfalls`/`markdown`).
 
-- **`_summarize_trace_for_prompt(trace: dict) -> str`** — unchanged from the
-  original: task/outcome/tool-calls-with-truncated-input-output/final text.
-- **`_propose(client, model, summaries, num_traces) -> dict`** — one
-  structured-output call; drafts a skill and flags concrete environment
-  facts (`uncertain_claims`) it isn't certain the trace itself proves.
-- **`_probe(client, model, candidate, workdir, max_turns) -> str`** — a
-  bounded tool-use loop (`PROBE_TOOL_DEFS` via `ReadOnlyProbeRunner`)
-  investigating `uncertain_claims` against `workdir`; returns the model's
-  plain-text VERIFIED/CONTRADICTED/UNVERIFIABLE summary, or an explicit
-  `"PROBING INCOMPLETE: ..."` marker if `max_turns` is exhausted before one
-  is produced (so an incomplete probe still narrows scope in `_commit`
-  rather than being silently discarded).
-- **`_commit(client, model, candidate, findings) -> dict`** — one more
-  structured-output call folding probe findings into a final decision:
-  correct/remove contradicted claims, narrow/soften unverifiable ones, keep
-  verified ones, or set `action: "skip"` if the whole draft is unreliable.
-- **`_finalize_unprobed(candidate) -> dict`** — used when there's nothing to
-  probe (disabled, no uncertain claims, or no workdir): commits the draft
-  as-is with empty `grounding_notes`.
-- **`generate_skill(trace_paths, model=DEFAULT_MODEL, client=None, enable_probing=True, max_probe_turns=DEFAULT_MAX_PROBE_TURNS) -> dict`**
-  — loads and summarizes every trace, proposes a candidate, then picks the
-  first trace (of *all* passed, not just the first argument) whose `workdir`
-  still exists on disk and probes against it if there are uncertain claims
-  to check; otherwise finalizes unprobed. Returns a dict with `action`
-  `"commit"` (skill fields + `grounding_notes` populated) or `"skip"`
-  (`skip_reason` populated, nothing should be written).
-- **`write_skill(skill: dict, out_dir: str) -> Path | None`** — returns
-  `None` (writes nothing) if `skill["action"] == "skip"`; otherwise
-  slugifies `skill["skill_name"]`, writes `skill["markdown"]` to
-  `<out_dir>/<slug>/SKILL.md`, and — if `grounding_notes` is non-empty —
-  also writes a `<out_dir>/<slug>/GROUNDING.md` log (one bullet per claim:
-  verdict, claim, note).
-
-### `trace_collection/adapters/swe_agent.py`
-
-Retrieves real, publicly released coding-agent trajectories (from the
-[SWE-agent](https://github.com/SWE-agent/SWE-agent) repo, pinned to a fixed
-commit) and reshapes them into this project's `Trace` schema, so
-`generate_skill` has genuine traces — and, where possible, a genuine
-environment — to work with instead of only synthetic eval fixtures.
-
-`SWE_AGENT_COMMIT`, `RAW_BASE` (pinned raw.githubusercontent.com prefix).
-`SOURCES: list[dict]` — each entry names an `instance_id`, `traj_path`, and a
-`workdir_strategy`: `"git_commit"` shallow-fetches `github_repo` at
-`base_commit_override` or the trajectory's own recorded `base_commit`;
-`"from_observations"` is for self-contained tasks with no external repo.
-
-- **`_extract_task(history) -> str`** — pulls the `ISSUE:` body out of
-  SWE-agent's first user turn; raises `ValueError` (not an uncaught
-  `StopIteration`) if the history has no user-role turn.
-- **`convert_trajectory(traj, instance_id, workdir) -> dict`** — reshapes a
-  `.traj` dict into a `Trace`-schema dict; each step's free-text `action`
-  becomes a `ToolCallRecord` named after its first word.
-- **`_fetch_repo_at_commit(github_repo, base_commit, dest) -> bool`** —
-  shallow `git init`/`remote add`/`fetch --depth 1`/`checkout FETCH_HEAD`;
-  returns `False` (leaving `dest` unpopulated) on any failure.
-- **`_materialize_from_observations(traj, dest) -> bool`** — for instances
-  with no external repo, reconstructs the *first* (pre-edit) snapshot of
-  each file SWE-agent's `open`/`create` steps printed back
-  (`[File: <path> (<n> lines total)]` + numbered lines), so probing still
-  has something real, if partial, to check.
-- **`_materialize_workdir(source, traj, workdir) -> bool`** — dispatches to
-  one of the two strategies above per `source["workdir_strategy"]`.
-- **`fetch_all(out_dir, with_workdir=True) -> list[Path]`** — downloads,
-  converts, and materializes every `SOURCES` entry, writing
-  `<out_dir>/<instance_id>/trace.json`; a source that fails (bad fetch,
-  unexpectedly-shaped trajectory) is reported and skipped rather than
-  aborting sources that would otherwise succeed.
-
-### `trace_collection/eval/fixtures.py` and `trace_collection/eval/harness.py`
-
-A minimal evaluation harness measuring the effect of environment-probing
-curation, in the spirit of the paper's CLBench comparison.
-
-- **`fixtures.py`**: `Scenario` (`name`, `description`, `build_workdir`,
-  `trace_factory`, `check`). `ALL_SCENARIOS` currently has two: `CONFIG_PORT`
-  (a stale README port contradicted by `config.yaml`) and `DEPLOY_SCRIPT` (a
-  stale doc reference to a renamed script). Each scenario's `trace_factory`
-  builds a fixed `Trace`-schema dict whose trajectory asserts the stale/wrong
-  fact; `check(markdown)` returns whether a generated skill states the
-  correct one instead.
-- **`harness.py`**: `_CallCounter`/`_CountingMessages` wrap a real
-  `anthropic.Anthropic` client to count `messages.create` calls (a proxy for
-  the paper's per-question query/cost metric). `run_scenario(scenario,
-  model, enable_probing, tmp_root) -> dict` runs `generate_skill` once under
-  one probing condition and scores it. `run_eval(model=DEFAULT_MODEL,
-  scenarios=None) -> list[dict]` runs every scenario under both conditions.
-  `format_report(results) -> str` renders the pass/fail + API-call table.
+- **`_summarize_trace_for_prompt(trace: dict) -> str`** — reduces a raw
+  trace dict to task/outcome/tool-calls-with-truncated-input-output/final
+  text, dropping full API payloads and thinking text.
+- **`generate_skill(trace_paths, model=DEFAULT_MODEL, client=None) -> dict`**
+  — loads each trace JSON file, summarizes it, and calls
+  `client.messages.create(..., output_config={"effort": "high", "format": {"type": "json_schema", "schema": SKILL_OUTPUT_SCHEMA}})`
+  with all summaries concatenated in one user message asking for one skill
+  generalizing across all the given traces. Parses and returns the JSON
+  text block from the response.
+- **`write_skill(skill: dict, out_dir: str) -> Path`** — slugifies
+  `skill["skill_name"]`, writes `skill["markdown"]` to
+  `<out_dir>/<slug>/SKILL.md`, returns the path.
 
 ### `trace_collection/cli.py`
 
 CLI entrypoint: collect real execution traces and generate/extract skills
 from them.
 
-- **`main(argv=None) -> int`** — subcommands via `argparse`:
+- **`main(argv=None) -> int`** — three subcommands via `argparse`:
   - `collect <task> [--workdir] [--out-dir] [--model] [--max-turns]` —
     constructs a `TraceCollector`, runs the task, saves the trace, prints
     outcome/turns/token usage.
-  - `generate-skill <traces...> [--out-dir] [--model] [--no-probing] [--max-probe-turns]`
-    — globs each trace argument (falling back to the literal string if the
-    glob matches nothing), calls `skill_generator.generate_skill`, prints
-    the skip reason or writes the result via `write_skill`.
-  - `eval [--model]` — runs `eval.harness.run_eval` and prints
-    `format_report`'s comparison table.
-  - `fetch-public-traces [--out-dir] [--no-workdir]` — calls
-    `adapters.swe_agent.fetch_all`, prints each written trace path and
-    whether a workdir was fetched for it.
+  - `generate-skill <traces...> [--out-dir] [--model]` — globs each trace
+    argument (falling back to the literal string if the glob matches
+    nothing), calls `skill_generator.generate_skill`, writes the result via
+    `write_skill`.
   - `extract-skills <traces...> [--out-dir] [--model]` — imports
-    `dspy_modules` lazily (so the other subcommands don't need `dspy`
+    `dspy_modules` lazily (so the other two subcommands don't need `dspy`
     installed), calls `configure_lm(model=args.model)`, loads each trace via
     `trace_from_dict`, runs `extract_skills(trace)`, writes each resulting
     `SkillDraft` as its own JSON file under `<out_dir>/<trace_id>-<i>.json`.
