@@ -10,6 +10,8 @@ mistake-laden trace at face value, the curator flags claims it's unsure of
 and checks them against the real environment with read-only tools before
 committing anything.
 
+Just want to run it? See [QUICKSTART.md](QUICKSTART.md).
+
 ## Requirements
 
 ```
