@@ -5,3 +5,4 @@ sandbox/
 traces/
 skills/
 .env
+sample_traces/*/workdir/

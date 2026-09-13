@@ -8,14 +8,18 @@ Usage:
         --out-dir ./skills
 
     python -m trace_collection.cli eval
+
+    python -m trace_collection.cli fetch-public-traces --out-dir ./sample_traces
 """
 
 from __future__ import annotations
 
 import argparse
 import glob
+import json
 import sys
 
+from .adapters.swe_agent import fetch_all
 from .collector import DEFAULT_MAX_TURNS, DEFAULT_MODEL, TraceCollector, save_trace
 from .eval.harness import format_report, run_eval
 from .skill_generator import DEFAULT_MAX_PROBE_TURNS, generate_skill, write_skill
@@ -50,6 +54,17 @@ def main(argv: list[str] | None = None) -> int:
         "eval", help="Run the environment-probing eval scenarios (probing on vs off)"
     )
     eval_p.add_argument("--model", default=DEFAULT_MODEL)
+
+    fetch_p = sub.add_parser(
+        "fetch-public-traces",
+        help="Retrieve real public coding-agent trajectories (SWE-agent demonstrations) as traces",
+    )
+    fetch_p.add_argument("--out-dir", default="./sample_traces")
+    fetch_p.add_argument(
+        "--no-workdir",
+        action="store_true",
+        help="Skip fetching the real repo at each trace's base commit; write traces without a probeable workdir",
+    )
 
     args = parser.parse_args(argv)
 
@@ -88,6 +103,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Running probing eval scenarios with {args.model} ...")
         results = run_eval(model=args.model)
         print(format_report(results))
+
+    elif args.cmd == "fetch-public-traces":
+        paths = fetch_all(args.out_dir, with_workdir=not args.no_workdir)
+        for path in paths:
+            has_workdir = json.loads(path.read_text())["workdir"] != ""
+            print(f"Wrote {path} (workdir fetched: {has_workdir})")
 
     return 0
 
