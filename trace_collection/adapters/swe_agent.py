@@ -30,10 +30,22 @@ from pathlib import Path
 SWE_AGENT_COMMIT = "3ea751c087f32b16e039a2233dd6eefecef325d5"
 RAW_BASE = f"https://raw.githubusercontent.com/SWE-agent/SWE-agent/{SWE_AGENT_COMMIT}"
 
-# Real SWE-agent demonstration trajectories with a fully-specified repo +
-# base_commit, so the fetched environment matches what the agent actually
-# saw. (SWE-agent ships other demos -- CTF challenges, a synthetic test
-# repo -- that lack a pinned base_commit; add them here once they do.)
+# Real SWE-agent demonstration trajectories. Each entry names a workdir
+# strategy for materializing something real for skill_generator's read-only
+# probe tools to check claims against:
+#
+#   "git_commit"       -- shallow-fetch github_repo at a base commit. Uses
+#                          the commit the trajectory's replay_config itself
+#                          records, unless base_commit_override is set (for
+#                          trajectories that only record a floating ref like
+#                          "HEAD" -- we pin to a concrete SHA resolved once,
+#                          at add-time, so the fetch stays reproducible even
+#                          if the demo repo moves on).
+#   "from_observations" -- no external repo is available (e.g. a
+#                          self-contained single-file task); reconstruct
+#                          whatever file(s) the trajectory's own
+#                          open/create observations show, so there is still
+#                          a real (if partial) environment to probe.
 SOURCES = [
     {
         "instance_id": "marshmallow-code__marshmallow-1867",
@@ -42,7 +54,35 @@ SOURCES = [
             "replay__marshmallow-code__marshmallow-1867__default_sys-env_window100"
             "__t-0.20__p-0.95__c-2.00__install-1/marshmallow-code__marshmallow-1867.traj"
         ),
+        "workdir_strategy": "git_commit",
         "github_repo": "https://github.com/marshmallow-code/marshmallow.git",
+    },
+    {
+        # A tiny, purpose-built demo repo (SWE-agent/test-repo): a missing
+        # colon in a function signature. The trajectory's own replay_config
+        # records base_commit "HEAD" (floating), so we pin to the concrete
+        # SHA that resolved to at the time this source was added.
+        "instance_id": "SWE-agent__test-repo-missing-colon",
+        "traj_path": (
+            "tests/test_data/trajectories/"
+            "gpt4__swe-agent-test-repo__default_from_url__t-0.00__p-0.95__c-3.00__install-1/"
+            "6e44b9__sweagenttestrepo-1c2844.traj"
+        ),
+        "workdir_strategy": "git_commit",
+        "github_repo": "https://github.com/SWE-agent/test-repo.git",
+        "base_commit_override": "7bef0c62cce60a2cb6df0c80f18b3054e1c23630",
+    },
+    {
+        # A self-contained, single-file algorithmic bug (HumanEvalFix-style):
+        # no real external repo -- rebuilt from the trajectory's own
+        # 'open main.py' observation.
+        "instance_id": "swe-bench-humanevalfix-python-0",
+        "traj_path": (
+            "trajectories/demonstrations/"
+            "human_thought__swe-bench-HumanEvalFix-python__lcb__t-0.00__p-0.95__c-4.00__install-0/"
+            "humanevalfix-python-0.traj"
+        ),
+        "workdir_strategy": "from_observations",
     },
 ]
 
@@ -135,22 +175,64 @@ def _fetch_repo_at_commit(github_repo: str, base_commit: str, dest: Path) -> boo
         return False
 
 
+_FILE_SNAPSHOT_RE = re.compile(r"^\[File: (?P<path>.+?) \(\d+ lines? total\)\]\n(?P<body>.*)", re.DOTALL)
+_NUMBERED_LINE_RE = re.compile(r"^\s*\d+:(.*)$")
+
+
+def _materialize_from_observations(traj: dict, dest: Path) -> bool:
+    """No real external repo is available for this instance. SWE-agent's
+    'open'/'create' commands print the full file back as
+    '[File: <path> (<n> lines total)]' followed by numbered lines --
+    reconstruct the first (pre-edit) snapshot of each such file so probing
+    still has something real, if partial, to check. Returns False if no
+    file snapshot was found in the trajectory."""
+    materialized = False
+    for step in traj["trajectory"]:
+        match = _FILE_SNAPSHOT_RE.match(step.get("observation", ""))
+        if not match:
+            continue
+        rel_path = Path(match.group("path")).name
+        target = dest / rel_path
+        if target.exists():
+            continue  # keep the earliest (pre-edit) snapshot already captured
+        lines = [
+            line_match.group(1)
+            for line_match in (_NUMBERED_LINE_RE.match(line) for line in match.group("body").splitlines())
+            if line_match
+        ]
+        if not lines:
+            continue
+        dest.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(lines) + "\n")
+        materialized = True
+    return materialized
+
+
+def _materialize_workdir(source: dict, traj: dict, workdir: Path) -> bool:
+    strategy = source.get("workdir_strategy", "git_commit")
+    if strategy == "git_commit":
+        repo_cfg = traj.get("replay_config", {}).get("env", {}).get("repo", {})
+        base_commit = source.get("base_commit_override") or repo_cfg.get("base_commit")
+        if not (base_commit and source.get("github_repo")):
+            return False
+        return _fetch_repo_at_commit(source["github_repo"], base_commit, workdir)
+    if strategy == "from_observations":
+        return _materialize_from_observations(traj, workdir)
+    raise ValueError(f"Unknown workdir_strategy: {strategy}")
+
+
 def fetch_all(out_dir: str, with_workdir: bool = True) -> list[Path]:
-    """Download each source trajectory, convert it, optionally fetch the
-    real repo at its base commit, and write
-    <out_dir>/<instance_id>/trace.json (+ workdir/ if fetched)."""
+    """Download each source trajectory, convert it, materialize its workdir
+    per its strategy, and write <out_dir>/<instance_id>/trace.json (+
+    workdir/ if materialized)."""
     out_root = Path(out_dir)
     written = []
     for source in SOURCES:
         traj = _fetch_json(f"{RAW_BASE}/{source['traj_path']}")
-        repo_cfg = traj.get("replay_config", {}).get("env", {}).get("repo", {})
-        base_commit = repo_cfg.get("base_commit")
 
         instance_dir = out_root / source["instance_id"]
         workdir = instance_dir / "workdir"
-        got_workdir = False
-        if with_workdir and base_commit and source.get("github_repo"):
-            got_workdir = _fetch_repo_at_commit(source["github_repo"], base_commit, workdir)
+        got_workdir = with_workdir and _materialize_workdir(source, traj, workdir)
 
         trace = convert_trajectory(traj, source["instance_id"], str(workdir) if got_workdir else None)
         instance_dir.mkdir(parents=True, exist_ok=True)
