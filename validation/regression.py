@@ -70,11 +70,17 @@ def check_regression(
     for key in _COST_KEYS:
         base_v = baseline_cost.get(key, 0.0)
         cand_v = candidate_cost.get(key, 0.0)
-        if base_v > 0 and cand_v > base_v * (1 + cost_tolerance):
+        # A zero baseline made the old base_v * (1 + cost_tolerance) check
+        # zero too, so it could never fire regardless of how large cand_v
+        # was. Floor the baseline at one unit (one token, one tool call)
+        # before applying the same tolerance, so a real increase from a
+        # zero baseline still fails the gate instead of being skipped.
+        threshold = max(base_v, 1.0) * (1 + cost_tolerance)
+        if cand_v > threshold:
             return _result(
                 False,
                 f"{key} regressed: {cand_v:.1f} vs baseline {base_v:.1f} "
-                f"(more than {cost_tolerance * 100:.0f}% worse)",
+                f"(exceeds threshold {threshold:.1f})",
             )
 
     return _result(True, "no regression detected")

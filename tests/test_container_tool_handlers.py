@@ -158,6 +158,34 @@ def test_relative_path_resolves_against_default_cwd():
     assert output == "1: x"
 
 
+def test_relative_path_traversal_outside_default_cwd_is_rejected():
+    runner, _ = _runner()
+    output, is_error = runner.run(
+        "str_replace_based_edit_tool", {"command": "view", "path": "../etc/shadow"}
+    )
+    assert is_error is True
+    assert "escapes the sandboxed root" in output
+
+
+def test_absolute_path_outside_default_cwd_is_rejected():
+    runner, _ = _runner()
+    output, is_error = runner.run(
+        "str_replace_based_edit_tool", {"command": "view", "path": "/etc/shadow"}
+    )
+    assert is_error is True
+    assert "escapes the sandboxed root" in output
+
+
+def test_absolute_path_under_default_cwd_is_still_allowed():
+    container = FakeContainer(files={"/root/nested/app.py": "x\n"})
+    runner, _ = _runner(container)
+    output, is_error = runner.run(
+        "str_replace_based_edit_tool", {"command": "view", "path": "/root/nested/app.py"}
+    )
+    assert is_error is False
+    assert output == "1: x"
+
+
 def test_create_writes_new_file_via_copy_to_container():
     runner, session = _runner()
     output, is_error = runner.run(

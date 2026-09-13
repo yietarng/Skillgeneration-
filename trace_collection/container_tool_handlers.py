@@ -26,6 +26,7 @@ a real Terminal-Bench task before relying on it for trace collection.
 
 from __future__ import annotations
 
+import posixpath
 import shlex
 import tempfile
 from pathlib import Path
@@ -104,11 +105,20 @@ class ContainerToolRunner:
     # -- text editor, direct container exec/copy (bypasses tmux) --------
 
     def _resolve(self, raw_path: str) -> str:
+        """Confine the text editor to default_cwd, the same guarantee
+        SandboxedToolRunner._resolve() makes for the local runner -- an
+        absolute path or a '..' segment can't reach outside it. (Bash calls
+        are a separate, unconfined execution path in both runners; that's
+        the container's own Docker isolation's job, not this one's -- see
+        the module docstring and IMPLEMENTATION_PLAN.md's noted risk.)"""
         if not raw_path:
             raise ToolExecutionError("Missing 'path' for text editor tool")
-        if raw_path.startswith("/"):
-            return raw_path
-        return f"{self.default_cwd.rstrip('/')}/{raw_path}"
+        joined = raw_path if raw_path.startswith("/") else f"{self.default_cwd.rstrip('/')}/{raw_path}"
+        normalized = posixpath.normpath(joined)
+        root = posixpath.normpath(self.default_cwd)
+        if normalized != root and not normalized.startswith(root + "/"):
+            raise ToolExecutionError(f"Path '{raw_path}' escapes the sandboxed root {root}")
+        return normalized
 
     def _exec(self, cmd: list[str]):
         return self.session.container.exec_run(cmd)
