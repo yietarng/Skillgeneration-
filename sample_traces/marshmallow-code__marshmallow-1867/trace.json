@@ -1,0 +1,137 @@
+{
+  "trace_id": "swe_agent_marshmallow-code__marshmallow-1867",
+  "task": "TimeDelta serialization precision\nHi there!\n\nI just found quite strange behaviour of `TimeDelta` field serialization\n\n```python3\nfrom marshmallow.fields import TimeDelta\nfrom datetime import timedelta\n\ntd_field = TimeDelta(precision=\"milliseconds\")\n\nobj = dict()\nobj[\"td_field\"] = timedelta(milliseconds=345)\n\nprint(td_field.serialize(\"td_field\", obj))\n```\n\nOutput of this snippet is `344`, but it seems that `345` is correct.\n\nLooks like a rounding issue here: https://github.com/marshmallow-code/marshmallow/blob/dev/src/marshmallow/fields.py#L1474",
+  "model": "gpt-4o",
+  "workdir": "sample_traces/marshmallow-code__marshmallow-1867/workdir",
+  "started_at": "2026-09-13T04:02:23.020761+00:00",
+  "ended_at": "2026-09-13T04:02:23.020854+00:00",
+  "outcome": "success",
+  "final_text": "\ndiff --git a/src/marshmallow/fields.py b/src/marshmallow/fields.py\nindex ad388c7..20da768 100644\n--- a/src/marshmallow/fields.py\n+++ b/src/marshmallow/fields.py\n@@ -1472,7 +1472,7 @@ class TimeDelta(Field):\n         if value is None:\n             return None\n         base_unit = dt.timedelta(**{self.precision: 1})\n-        return int(value.total_seconds() / base_unit.total_seconds())\n+        return int(round(value.total_seconds() / base_unit.total_seconds()))  # round to nearest int\n \n     def _deserialize(self, value, attr, data, **kwargs):\n         try:\n",
+  "total_usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  },
+  "steps": [
+    {
+      "turn": 0,
+      "timestamp": "2026-09-13T04:02:23.020861+00:00",
+      "stop_reason": "end_turn",
+      "usage": {},
+      "response": {},
+      "tool_calls": [
+        {
+          "tool_use_id": "marshmallow-code__marshmallow-1867-0",
+          "name": "create",
+          "input": {
+            "action": "create reproduce.py\n"
+          },
+          "output": "[File: /marshmallow-code__marshmallow/reproduce.py (1 lines total)]\n1:\n",
+          "is_error": false,
+          "duration_ms": 0.0
+        },
+        {
+          "tool_use_id": "marshmallow-code__marshmallow-1867-1",
+          "name": "edit",
+          "input": {
+            "action": "edit 1:1\nfrom marshmallow.fields import TimeDelta\nfrom datetime import timedelta\n\ntd_field = TimeDelta(precision=\"milliseconds\")\n\nobj = dict()\nobj[\"td_field\"] = timedelta(milliseconds=345)\n\nprint(td_field.serialize(\"td_field\", obj))\nend_of_edit\n"
+          },
+          "output": "[File: /marshmallow-code__marshmallow/reproduce.py (9 lines total)]\n1:from marshmallow.fields import TimeDelta\n2:from datetime import timedelta\n3:\n4:td_field = TimeDelta(precision=\"milliseconds\")\n5:\n6:obj = dict()\n7:obj[\"td_field\"] = timedelta(milliseconds=345)\n8:\n9:print(td_field.serialize(\"td_field\", obj))\nFile updated. Please review the changes and make sure they are correct (correct indentation, no duplicate lines, etc). Edit the file again if necessary.\n",
+          "is_error": false,
+          "duration_ms": 0.0
+        },
+        {
+          "tool_use_id": "marshmallow-code__marshmallow-1867-2",
+          "name": "python",
+          "input": {
+            "action": "python reproduce.py\n"
+          },
+          "output": "344\n",
+          "is_error": false,
+          "duration_ms": 0.0
+        },
+        {
+          "tool_use_id": "marshmallow-code__marshmallow-1867-3",
+          "name": "ls",
+          "input": {
+            "action": "ls -F\n"
+          },
+          "output": "AUTHORS.rst\nCHANGELOG.rst\nCODE_OF_CONDUCT.md\nCONTRIBUTING.rst\nLICENSE\nMANIFEST.in\nNOTICE\nREADME.rst\nRELEASING.md\nazure-pipelines.yml\ndocs/\nexamples/\nperformance/\npyproject.toml\nreproduce.py\nsetup.cfg\nsetup.py\nsrc/\ntests/\ntox.ini\n",
+          "is_error": false,
+          "duration_ms": 0.0
+        },
+        {
+          "tool_use_id": "marshmallow-code__marshmallow-1867-4",
+          "name": "find_file",
+          "input": {
+            "action": "find_file \"fields.py\" src\n"
+          },
+          "output": "Found 1 matches for \"fields.py\" in /marshmallow-code__marshmallow/src:\n/marshmallow-code__marshmallow/src/marshmallow/fields.py\n",
+          "is_error": false,
+          "duration_ms": 0.0
+        },
+        {
+          "tool_use_id": "marshmallow-code__marshmallow-1867-5",
+          "name": "open",
+          "input": {
+            "action": "open src/marshmallow/fields.py 1474\n"
+          },
+          "output": "[File: /marshmallow-code__marshmallow/src/marshmallow/fields.py (1997 lines total)]\n(1458 more lines above)\n1459:            self.WEEKS,\n1460:        )\n1461:\n1462:        if precision not in units:\n1463:            msg = 'The precision must be {} or \"{}\".'.format(\n1464:                \", \".join([f'\"{each}\"' for each in units[:-1]]), units[-1]\n1465:            )\n1466:            raise ValueError(msg)\n1467:\n1468:        self.precision = precision\n1469:        super().__init__(**kwargs)\n1470:\n1471:    def _serialize(self, value, attr, obj, **kwargs):\n1472:        if value is None:\n1473:            return None\n1474:        base_unit = dt.timedelta(**{self.precision: 1})\n1475:        return int(value.total_seconds() / base_unit.total_seconds())\n1476:\n1477:    def _deserialize(self, value, attr, data, **kwargs):\n1478:        try:\n1479:            value = int(value)\n1480:        except (TypeError, ValueError) as error:\n1481:            raise self.make_error(\"invalid\") from error\n1482:\n1483:        kwargs = {self.precision: value}\n1484:\n1485:        try:\n1486:            return dt.timedelta(**kwargs)\n1487:        except OverflowError as error:\n1488:            raise self.make_error(\"invalid\") from error\n1489:\n1490:\n1491:class Mapping(Field):\n1492:    \"\"\"An abstract class for objects with key-value pairs.\n1493:\n1494:    :param keys: A field class or instance for dict keys.\n1495:    :param values: A field class or instance for dict values.\n1496:    :param kwargs: The same keyword arguments that :class:`Field` receives.\n1497:\n1498:    .. note::\n1499:        When the structure of nested data is not known, you may omit the\n1500:        `keys` and `values` arguments to prevent content validation.\n1501:\n1502:    .. versionadded:: 3.0.0rc4\n1503:    \"\"\"\n1504:\n1505:    mapping_type = dict\n1506:\n1507:    #: Default error messages.\n1508:    default_error_messages = {\"invalid\": \"Not a valid mapping type.\"}\n1509:\n1510:    def __init__(\n1511:        self,\n1512:        keys: typing.Optional[typing.Union[Field, type]] = None,\n1513:        values: typing.Optional[typing.Union[Field, type]] = None,\n1514:        **kwargs,\n1515:    ):\n1516:        super().__init__(**kwargs)\n1517:        if keys is None:\n1518:            self.key_field = None\n1519:        else:\n1520:            try:\n1521:                self.key_field = resolve_field_instance(keys)\n1522:            except FieldInstanceResolutionError as error:\n1523:                raise ValueError(\n1524:                    '\"keys\" must be a subclass or instance of '\n1525:                    \"marshmallow.base.FieldABC.\"\n1526:                ) from error\n1527:\n1528:        if values is None:\n1529:            self.value_field = None\n1530:        else:\n1531:            try:\n1532:                self.value_field = resolve_field_instance(values)\n1533:            except FieldInstanceResolutionError as error:\n1534:                raise ValueError(\n1535:                    '\"values\" must be a subclass or instance of '\n1536:                    \"marshmallow.base.FieldABC.\"\n1537:                ) from error\n1538:            if isinstance(self.value_field, Nested):\n1539:                self.only = self.value_field.only\n1540:                self.exclude = self.value_field.exclude\n1541:\n1542:    def _bind_to_schema(self, field_name, schema):\n1543:        super()._bind_to_schema(field_name, schema)\n1544:        if self.value_field:\n1545:            self.value_field = copy.deepcopy(self.value_field)\n1546:            self.value_field._bind_to_schema(field_name, self)\n1547:        if isinstance(self.value_field, Nested):\n1548:            self.value_field.only = self.only\n1549:            self.value_field.exclude = self.exclude\n1550:        if self.key_field:\n1551:            self.key_field = copy.deepcopy(self.key_field)\n1552:            self.key_field._bind_to_schema(field_name, self)\n1553:\n1554:    def _serialize(self, value, attr, obj, **kwargs):\n1555:        if value is None:\n1556:            return None\n1557:        if not self.value_field and not self.key_field:\n1558:            return self.mapping_type(value)\n(439 more lines below)\n",
+          "is_error": false,
+          "duration_ms": 0.0
+        },
+        {
+          "tool_use_id": "marshmallow-code__marshmallow-1867-6",
+          "name": "edit",
+          "input": {
+            "action": "edit 1475:1475\nreturn int(round(value.total_seconds() / base_unit.total_seconds()))  # round to nearest int\nend_of_edit\n"
+          },
+          "output": "Your proposed edit has introduced new syntax error(s). Please understand the fixes and retry your edit commmand.\n\nERRORS:\n- E999 IndentationError: unexpected indent\n\nThis is how your edit would have looked if applied\n-------------------------------------------------\n[File: /marshmallow-code__marshmallow/src/marshmallow/fields.py (1997 lines total)]\n(1468 more lines above)\n1469:        super().__init__(**kwargs)\n1470:\n1471:    def _serialize(self, value, attr, obj, **kwargs):\n1472:        if value is None:\n1473:            return None\n1474:        base_unit = dt.timedelta(**{self.precision: 1})\n1475:return int(round(value.total_seconds() / base_unit.total_seconds()))  # round to nearest int\n1476:\n1477:    def _deserialize(self, value, attr, data, **kwargs):\n1478:        try:\n1479:            value = int(value)\n(518 more lines below)\n-------------------------------------------------\n\nThis is the original code before your edit\n-------------------------------------------------\n[File: /marshmallow-code__marshmallow/src/marshmallow/fields.py (1997 lines total)]\n(1469 more lines above)\n1470:\n1471:    def _serialize(self, value, attr, obj, **kwargs):\n1472:        if value is None:\n1473:            return None\n1474:        base_unit = dt.timedelta(**{self.precision: 1})\n1475:        return int(value.total_seconds() / base_unit.total_seconds())\n1476:\n1477:    def _deserialize(self, value, attr, data, **kwargs):\n1478:        try:\n1479:            value = int(value)\n1480:        except (TypeError, ValueError) as error:\n(517 more lines below)\n-------------------------------------------------\nYour changes have NOT been applied. Please fix your edit command and try again.\nYou either need to 1) Specify the correct start/end line arguments or 2) Correct your edit code.\nDO NOT re-run the same failed edit command. Running it again will lead to the same error.\n",
+          "is_error": false,
+          "duration_ms": 0.0
+        },
+        {
+          "tool_use_id": "marshmallow-code__marshmallow-1867-7",
+          "name": "edit",
+          "input": {
+            "action": "edit 1475:1475\n        return int(round(value.total_seconds() / base_unit.total_seconds()))  # round to nearest int\nend_of_edit\n"
+          },
+          "output": "[File: /marshmallow-code__marshmallow/src/marshmallow/fields.py (1997 lines total)]\n(1424 more lines above)\n1425:\n1426:    :param precision: Influences how the integer is interpreted during\n1427:        (de)serialization. Must be 'days', 'seconds', 'microseconds',\n1428:        'milliseconds', 'minutes', 'hours' or 'weeks'.\n1429:    :param kwargs: The same keyword arguments that :class:`Field` receives.\n1430:\n1431:    .. versionchanged:: 2.0.0\n1432:        Always serializes to an integer value to avoid rounding errors.\n1433:        Add `precision` parameter.\n1434:    \"\"\"\n1435:\n1436:    DAYS = \"days\"\n1437:    SECONDS = \"seconds\"\n1438:    MICROSECONDS = \"microseconds\"\n1439:    MILLISECONDS = \"milliseconds\"\n1440:    MINUTES = \"minutes\"\n1441:    HOURS = \"hours\"\n1442:    WEEKS = \"weeks\"\n1443:\n1444:    #: Default error messages.\n1445:    default_error_messages = {\n1446:        \"invalid\": \"Not a valid period of time.\",\n1447:        \"format\": \"{input!r} cannot be formatted as a timedelta.\",\n1448:    }\n1449:\n1450:    def __init__(self, precision: str = SECONDS, **kwargs):\n1451:        precision = precision.lower()\n1452:        units = (\n1453:            self.DAYS,\n1454:            self.SECONDS,\n1455:            self.MICROSECONDS,\n1456:            self.MILLISECONDS,\n1457:            self.MINUTES,\n1458:            self.HOURS,\n1459:            self.WEEKS,\n1460:        )\n1461:\n1462:        if precision not in units:\n1463:            msg = 'The precision must be {} or \"{}\".'.format(\n1464:                \", \".join([f'\"{each}\"' for each in units[:-1]]), units[-1]\n1465:            )\n1466:            raise ValueError(msg)\n1467:\n1468:        self.precision = precision\n1469:        super().__init__(**kwargs)\n1470:\n1471:    def _serialize(self, value, attr, obj, **kwargs):\n1472:        if value is None:\n1473:            return None\n1474:        base_unit = dt.timedelta(**{self.precision: 1})\n1475:        return int(round(value.total_seconds() / base_unit.total_seconds()))  # round to nearest int\n1476:\n1477:    def _deserialize(self, value, attr, data, **kwargs):\n1478:        try:\n1479:            value = int(value)\n1480:        except (TypeError, ValueError) as error:\n1481:            raise self.make_error(\"invalid\") from error\n1482:\n1483:        kwargs = {self.precision: value}\n1484:\n1485:        try:\n1486:            return dt.timedelta(**kwargs)\n1487:        except OverflowError as error:\n1488:            raise self.make_error(\"invalid\") from error\n1489:\n1490:\n1491:class Mapping(Field):\n1492:    \"\"\"An abstract class for objects with key-value pairs.\n1493:\n1494:    :param keys: A field class or instance for dict keys.\n1495:    :param values: A field class or instance for dict values.\n1496:    :param kwargs: The same keyword arguments that :class:`Field` receives.\n1497:\n1498:    .. note::\n1499:        When the structure of nested data is not known, you may omit the\n1500:        `keys` and `values` arguments to prevent content validation.\n1501:\n1502:    .. versionadded:: 3.0.0rc4\n1503:    \"\"\"\n1504:\n1505:    mapping_type = dict\n1506:\n1507:    #: Default error messages.\n1508:    default_error_messages = {\"invalid\": \"Not a valid mapping type.\"}\n1509:\n1510:    def __init__(\n1511:        self,\n1512:        keys: typing.Optional[typing.Union[Field, type]] = None,\n1513:        values: typing.Optional[typing.Union[Field, type]] = None,\n1514:        **kwargs,\n1515:    ):\n1516:        super().__init__(**kwargs)\n1517:        if keys is None:\n1518:            self.key_field = None\n1519:        else:\n1520:            try:\n1521:                self.key_field = resolve_field_instance(keys)\n1522:            except FieldInstanceResolutionError as error:\n1523:                raise ValueError(\n1524:                    '\"keys\" must be a subclass or instance of '\n(473 more lines below)\nFile updated. Please review the changes and make sure they are correct (correct indentation, no duplicate lines, etc). Edit the file again if necessary.\n",
+          "is_error": false,
+          "duration_ms": 0.0
+        },
+        {
+          "tool_use_id": "marshmallow-code__marshmallow-1867-8",
+          "name": "python",
+          "input": {
+            "action": "python reproduce.py\n"
+          },
+          "output": "345\n",
+          "is_error": false,
+          "duration_ms": 0.0
+        },
+        {
+          "tool_use_id": "marshmallow-code__marshmallow-1867-9",
+          "name": "rm",
+          "input": {
+            "action": "rm reproduce.py\n"
+          },
+          "output": "",
+          "is_error": false,
+          "duration_ms": 0.0
+        },
+        {
+          "tool_use_id": "marshmallow-code__marshmallow-1867-10",
+          "name": "submit",
+          "input": {
+            "action": "submit\n"
+          },
+          "output": "\ndiff --git a/src/marshmallow/fields.py b/src/marshmallow/fields.py\nindex ad388c7..20da768 100644\n--- a/src/marshmallow/fields.py\n+++ b/src/marshmallow/fields.py\n@@ -1472,7 +1472,7 @@ class TimeDelta(Field):\n         if value is None:\n             return None\n         base_unit = dt.timedelta(**{self.precision: 1})\n-        return int(value.total_seconds() / base_unit.total_seconds())\n+        return int(round(value.total_seconds() / base_unit.total_seconds()))  # round to nearest int\n \n     def _deserialize(self, value, attr, data, **kwargs):\n         try:\n",
+          "is_error": false,
+          "duration_ms": 0.0
+        }
+      ]
+    }
+  ]
+}

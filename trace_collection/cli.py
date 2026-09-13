@@ -7,6 +7,10 @@ Usage:
     python -m trace_collection.cli generate-skill "./traces/*.json" \\
         --out-dir ./skills
 
+    python -m trace_collection.cli eval
+
+    python -m trace_collection.cli fetch-public-traces --out-dir ./sample_traces
+
     python -m trace_collection.cli extract-skills "./traces/*.json" \\
         --out-dir ./skill_drafts
 """
@@ -20,9 +24,11 @@ import json
 import sys
 from pathlib import Path
 
+from .adapters.swe_agent import fetch_all
 from .collector import DEFAULT_MAX_TURNS, DEFAULT_MODEL, TraceCollector, save_trace
+from .eval.harness import format_report, run_eval
 from .schema import trace_from_dict
-from .skill_generator import generate_skill, write_skill
+from .skill_generator import DEFAULT_MAX_PROBE_TURNS, generate_skill, write_skill
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -43,6 +49,28 @@ def main(argv: list[str] | None = None) -> int:
     skill_p.add_argument("traces", nargs="+", help="Trace JSON files or glob patterns")
     skill_p.add_argument("--out-dir", default="./skills")
     skill_p.add_argument("--model", default=DEFAULT_MODEL)
+    skill_p.add_argument(
+        "--no-probing",
+        action="store_true",
+        help="Skip environment-probing curation; commit the first draft as-is",
+    )
+    skill_p.add_argument("--max-probe-turns", type=int, default=DEFAULT_MAX_PROBE_TURNS)
+
+    eval_p = sub.add_parser(
+        "eval", help="Run the environment-probing eval scenarios (probing on vs off)"
+    )
+    eval_p.add_argument("--model", default=DEFAULT_MODEL)
+
+    fetch_p = sub.add_parser(
+        "fetch-public-traces",
+        help="Retrieve real public coding-agent trajectories (SWE-agent demonstrations) as traces",
+    )
+    fetch_p.add_argument("--out-dir", default="./sample_traces")
+    fetch_p.add_argument(
+        "--no-workdir",
+        action="store_true",
+        help="Skip fetching the real repo at each trace's base commit; write traces without a probeable workdir",
+    )
 
     extract_p = sub.add_parser(
         "extract-skills",
@@ -72,9 +100,29 @@ def main(argv: list[str] | None = None) -> int:
             matched = glob.glob(pattern)
             paths.extend(matched if matched else [pattern])
         print(f"Synthesizing skill from {len(paths)} trace(s) with {args.model} ...")
-        skill = generate_skill(paths, model=args.model)
-        out_path = write_skill(skill, args.out_dir)
-        print(f"Skill '{skill['skill_name']}' written to {out_path}")
+        skill = generate_skill(
+            paths,
+            model=args.model,
+            enable_probing=not args.no_probing,
+            max_probe_turns=args.max_probe_turns,
+        )
+        if skill["action"] == "skip":
+            print(f"Curator skipped this skill: {skill['skip_reason']}")
+        else:
+            out_path = write_skill(skill, args.out_dir)
+            notes = skill.get("grounding_notes") or []
+            print(f"Skill '{skill['skill_name']}' written to {out_path} ({len(notes)} grounding note(s))")
+
+    elif args.cmd == "eval":
+        print(f"Running probing eval scenarios with {args.model} ...")
+        results = run_eval(model=args.model)
+        print(format_report(results))
+
+    elif args.cmd == "fetch-public-traces":
+        paths = fetch_all(args.out_dir, with_workdir=not args.no_workdir)
+        for path in paths:
+            has_workdir = json.loads(path.read_text())["workdir"] != ""
+            print(f"Wrote {path} (workdir fetched: {has_workdir})")
 
     elif args.cmd == "extract-skills":
         # Imported lazily: dspy_modules pulls in dspy, which isn't needed by

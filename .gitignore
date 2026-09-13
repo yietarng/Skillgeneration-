@@ -7,3 +7,4 @@ skills/
 skill_drafts/
 .pytest_cache/
 .env
+sample_traces/*/workdir/
