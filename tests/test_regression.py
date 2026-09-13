@@ -1,5 +1,5 @@
 from skill_library.storage import Provenance, Skill
-from trace_collection.schema import Trace
+from trace_collection.schema import StepRecord, ToolCallRecord, Trace
 from validation.regression import check_regression
 
 
@@ -11,12 +11,17 @@ def _skill(procedure: str, version: int) -> Skill:
     )
 
 
-def _trace(score: float, cost_tokens: int = 100) -> Trace:
+def _trace(score: float, cost_tokens: int = 100, num_tool_calls: int = 0) -> Trace:
+    tool_calls = [
+        ToolCallRecord(tool_use_id=f"tc{i}", name="bash", input={}, output="", is_error=False, duration_ms=1.0)
+        for i in range(num_tool_calls)
+    ]
     return Trace(
         trace_id="t", task="x", model="m", workdir="/w", started_at="now",
         outcome="success" if score >= 1.0 else "max_turns",
         outcome_signal={"kind": "test", "score": score, "detail": ""},
         total_usage={"input_tokens": cost_tokens, "output_tokens": cost_tokens},
+        steps=[StepRecord(turn=0, timestamp="now", stop_reason=None, usage={}, response={}, tool_calls=tool_calls)],
     )
 
 
@@ -75,6 +80,31 @@ def test_tolerates_small_cost_increase():
     def run_task_fn(task_id, fields):
         cost = 110 if fields["procedure"] == "candidate proc" else 100
         return _trace(1.0, cost_tokens=cost)
+
+    candidate = _skill("candidate proc", 2)
+    baseline = _skill("baseline proc", 1)
+
+    result = check_regression(candidate, baseline, ["a"], run_task_fn, cost_tolerance=0.25)
+    assert result.passed is True
+
+
+def test_fails_on_cost_blowup_from_zero_baseline():
+    def run_task_fn(task_id, fields):
+        num_calls = 50 if fields["procedure"] == "candidate proc" else 0
+        return _trace(1.0, num_tool_calls=num_calls)
+
+    candidate = _skill("candidate proc", 2)
+    baseline = _skill("baseline proc", 1)
+
+    result = check_regression(candidate, baseline, ["a"], run_task_fn, cost_tolerance=0.25)
+    assert result.passed is False
+    assert "tool_calls regressed" in result.reason
+
+
+def test_tolerates_small_cost_from_zero_baseline():
+    def run_task_fn(task_id, fields):
+        num_calls = 1 if fields["procedure"] == "candidate proc" else 0
+        return _trace(1.0, num_tool_calls=num_calls)
 
     candidate = _skill("candidate proc", 2)
     baseline = _skill("baseline proc", 1)
