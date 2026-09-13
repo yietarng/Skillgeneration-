@@ -32,6 +32,20 @@ class StepRecord:
 
 
 @dataclasses.dataclass
+class Segment:
+    """A P1-identified span of a trace that may carry transferable knowledge.
+    Filled in by dspy_modules.p1_extraction, not at collection time -- see
+    PROJECT_SPEC.md §4.2."""
+
+    trace_id: str
+    turn_range: tuple[int, int]
+    kind: str  # plan | procedure | tool_convention | failure_recovery | noise
+    abstraction_level: str | None = None  # episode_specific | task_class | overgeneral
+    rationale: str = ""
+    is_successful_branch: bool = True
+
+
+@dataclasses.dataclass
 class Trace:
     trace_id: str
     task: str
@@ -50,6 +64,44 @@ class Trace:
             "cache_read_input_tokens": 0,
         }
     )
+    # {"kind": "test"|"exit_code"|"llm_judge"|"human", "score": float, "detail": str}
+    outcome_signal: dict[str, Any] | None = None
+    # {"repo": str, "language": str, "task_type": str}
+    repo_context: dict[str, Any] | None = None
+    # Filled in by P1 extraction, not at collection time.
+    segments: list[Segment] = dataclasses.field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
+
+
+def trace_from_dict(data: dict[str, Any]) -> Trace:
+    """Reconstruct a Trace (with nested StepRecord/ToolCallRecord/Segment
+    dataclasses) from a plain dict, e.g. ``json.loads`` of a saved trace."""
+    steps = [
+        StepRecord(
+            turn=s["turn"],
+            timestamp=s["timestamp"],
+            stop_reason=s.get("stop_reason"),
+            usage=s.get("usage", {}),
+            response=s.get("response", {}),
+            tool_calls=[ToolCallRecord(**c) for c in s.get("tool_calls", [])],
+        )
+        for s in data.get("steps", [])
+    ]
+    segments = [Segment(**seg) for seg in data.get("segments", [])]
+    return Trace(
+        trace_id=data["trace_id"],
+        task=data["task"],
+        model=data["model"],
+        workdir=data["workdir"],
+        started_at=data["started_at"],
+        ended_at=data.get("ended_at"),
+        steps=steps,
+        outcome=data.get("outcome", "in_progress"),
+        final_text=data.get("final_text"),
+        total_usage=data.get("total_usage", {}),
+        outcome_signal=data.get("outcome_signal"),
+        repo_context=data.get("repo_context"),
+        segments=segments,
+    )
