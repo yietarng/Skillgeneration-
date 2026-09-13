@@ -22,7 +22,7 @@ version: how to install it, run the tests, and actually use it.
 | P4 | `validation/` | Gates a candidate on in-domain held-out score *and* cross-domain regression + cost before promoting it |
 | P5 | `retrieval/` | Retrieves, activates, adapts, and safely injects a relevant skill into a new task |
 | — | `orchestrator/` | Ties all five into one loop (`driver.py`) with a CLI (`cli.py`) driving it against real task execution |
-| — | `trace_collection/` | Runs the actual agent loop (local sandbox or a real [Terminal-Bench](https://github.com/laude-institute/terminal-bench) container) and records what happened; also hosts a second, self-contained skill-generation path (below) |
+| — | `trace_collection/` | Runs the actual agent loop (local sandbox or a real [Terminal-Bench](https://github.com/laude-institute/terminal-bench) container) and records what happened |
 
 Every module accepts its external dependencies (the backend LM, the task
 executor) as arguments — nothing is hardwired to one model or one benchmark.
@@ -80,44 +80,9 @@ if either is missing rather than silently doing the wrong thing:
 python -m trace_collection.cli collect "Add a /health endpoint to app.py" \
     --workdir ./sandbox --out-dir ./traces
 
-# Extract candidate skills from it (P1: Segmenter/AbstractionJudge/Abstractor)
+# Extract candidate skills from it
 python -m trace_collection.cli extract-skills "./traces/*.json" --out-dir ./skill_drafts
 ```
-
-### Alternative: environment-probing curation (no library/P2 required)
-
-`trace_collection/skill_generator.py` also implements a second, self-contained
-way to turn a trace into a skill — not P1's DSPy segmentation pipeline, but a
-direct **propose → probe → commit** curation cycle from
-["Grounding Agent Memory: Environment-Probing Curation for Enterprise Agents"](https://arxiv.org/abs/2609.11060)
-(arXiv:2609.11060). A trace is a single, partial, sometimes mistake-laden
-observation; instead of trusting it at face value, the curator flags concrete
-environment claims it's unsure of and — if the trace's `workdir` is still
-around — checks them with read-only tools (`probe_tools.py`) before
-committing a final skill, or skipping it if probing shows the draft would be
-misleading. It writes a single `SKILL.md` (+ a `GROUNDING.md` log of what was
-checked) directly, with no library/versioning step:
-
-```bash
-python -m trace_collection.cli generate-skill "./traces/*.json" \
-    --out-dir ./skills
-# --no-probing skips grounding and commits the first draft as-is, for comparison
-
-# See the measured effect of probing on small synthetic fixtures:
-python -m trace_collection.cli eval
-
-# Pull in real public coding-agent trajectories (with a real environment
-# attached) instead of collecting your own:
-python -m trace_collection.cli fetch-public-traces --out-dir ./sample_traces
-```
-
-Use this path when you want one grounded skill fast, without standing up
-`skill_library`/P2; use `extract-skills` (P1) when you want candidates that
-flow into the versioned library and the rest of the P2–P5 pipeline. The two
-are independent — nothing else in this repo depends on which one you use. See
-[QUICKSTART.md](QUICKSTART.md) for a copy-pasteable, step-by-step walkthrough
-of this path specifically, including sample traces already checked in under
-`sample_traces/`.
 
 ### Run a real Terminal-Bench task through the whole live loop
 
@@ -171,12 +136,6 @@ skill_library_data/
 
 traces/
   <trace-id>.json    # one collected execution trace, secrets redacted before write
-
-skills/
-  <slug>/SKILL.md, GROUNDING.md   # output of the environment-probing path above (no library)
-
-sample_traces/
-  <instance>/trace.json, workdir/   # real public traces + their environment, from fetch-public-traces
 ```
 
 `SKILL.md` is generated for humans/agents to read; `metadata.json` is what
