@@ -6,6 +6,8 @@ Usage:
 
     python -m trace_collection.cli generate-skill "./traces/*.json" \\
         --out-dir ./skills
+
+    python -m trace_collection.cli eval
 """
 
 from __future__ import annotations
@@ -15,7 +17,8 @@ import glob
 import sys
 
 from .collector import DEFAULT_MAX_TURNS, DEFAULT_MODEL, TraceCollector, save_trace
-from .skill_generator import generate_skill, write_skill
+from .eval.harness import format_report, run_eval
+from .skill_generator import DEFAULT_MAX_PROBE_TURNS, generate_skill, write_skill
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -36,6 +39,17 @@ def main(argv: list[str] | None = None) -> int:
     skill_p.add_argument("traces", nargs="+", help="Trace JSON files or glob patterns")
     skill_p.add_argument("--out-dir", default="./skills")
     skill_p.add_argument("--model", default=DEFAULT_MODEL)
+    skill_p.add_argument(
+        "--no-probing",
+        action="store_true",
+        help="Skip environment-probing curation; commit the first draft as-is",
+    )
+    skill_p.add_argument("--max-probe-turns", type=int, default=DEFAULT_MAX_PROBE_TURNS)
+
+    eval_p = sub.add_parser(
+        "eval", help="Run the environment-probing eval scenarios (probing on vs off)"
+    )
+    eval_p.add_argument("--model", default=DEFAULT_MODEL)
 
     args = parser.parse_args(argv)
 
@@ -57,9 +71,23 @@ def main(argv: list[str] | None = None) -> int:
             matched = glob.glob(pattern)
             paths.extend(matched if matched else [pattern])
         print(f"Synthesizing skill from {len(paths)} trace(s) with {args.model} ...")
-        skill = generate_skill(paths, model=args.model)
-        out_path = write_skill(skill, args.out_dir)
-        print(f"Skill '{skill['skill_name']}' written to {out_path}")
+        skill = generate_skill(
+            paths,
+            model=args.model,
+            enable_probing=not args.no_probing,
+            max_probe_turns=args.max_probe_turns,
+        )
+        if skill["action"] == "skip":
+            print(f"Curator skipped this skill: {skill['skip_reason']}")
+        else:
+            out_path = write_skill(skill, args.out_dir)
+            notes = skill.get("grounding_notes") or []
+            print(f"Skill '{skill['skill_name']}' written to {out_path} ({len(notes)} grounding note(s))")
+
+    elif args.cmd == "eval":
+        print(f"Running probing eval scenarios with {args.model} ...")
+        results = run_eval(model=args.model)
+        print(format_report(results))
 
     return 0
 
